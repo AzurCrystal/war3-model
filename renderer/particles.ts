@@ -69,6 +69,14 @@ interface ParticleEmitterWrapper {
     indexGPUBuffer: GPUBuffer;
 
     fsUniformsBuffer: GPUBuffer;
+    fsUniformsBindGroup?: GPUBindGroup;
+    fsUniformsBoundBuffer?: GPUBuffer;
+    fsUniformsTexture?: GPUTexture;
+    fsUniformsSampler?: GPUSampler;
+    fsUniformsInitialized?: boolean;
+    fsTeamColorR?: number;
+    fsTeamColorG?: number;
+    fsTeamColorB?: number;
 }
 
 const DISCARD_ALPHA_KEY_LEVEL = 0.83;
@@ -88,6 +96,18 @@ export class ParticlesController {
     private fsBindGroupLayout: GPUBindGroupLayout | null;
     private gpuVSUniformsBuffer: GPUBuffer;
     private gpuVSUniformsBindGroup: GPUBindGroup;
+    private gpuVSUniformsValues = new ArrayBuffer(128);
+    private gpuVSUniformsViews = {
+        mvMatrix: new Float32Array(this.gpuVSUniformsValues, 0, 16),
+        pMatrix: new Float32Array(this.gpuVSUniformsValues, 64, 16)
+    };
+    private gpuVSMatricesInitialized = false;
+    private gpuFSUniformsValues = new ArrayBuffer(32);
+    private gpuFSUniformsViews = {
+        replaceableColor: new Float32Array(this.gpuFSUniformsValues, 0, 3),
+        replaceableType: new Uint32Array(this.gpuFSUniformsValues, 12, 1),
+        discardAlphaLevel: new Float32Array(this.gpuFSUniformsValues, 16, 1),
+    };
 
     private shaderProgramLocations: {
         vertexPositionAttribute: number | null;
@@ -106,6 +126,7 @@ export class ParticlesController {
     private interp: ModelInterp;
     private rendererData: RendererData;
     private emitters: ParticleEmitterWrapper[];
+    private emittersByIndex: ParticleEmitterWrapper[];
 
     private particleBaseVectors: vec3[];
 
@@ -125,6 +146,7 @@ export class ParticlesController {
         this.interp = interp;
         this.rendererData = rendererData;
         this.emitters = [];
+        this.emittersByIndex = [];
 
         if (rendererData.model.ParticleEmitters2.length) {
             this.particleBaseVectors = [
@@ -171,6 +193,7 @@ export class ParticlesController {
                 );
 
                 this.emitters.push(emitter);
+                this.emittersByIndex[i] = emitter;
             }
             this.emitters.sort((left, right) => comparePriorityPlane(
                 left.props.PriorityPlane,
@@ -242,6 +265,7 @@ export class ParticlesController {
         }
 
         this.emitters = [];
+        this.emittersByIndex = [];
     }
 
     public initGL (glContext: WebGLRenderingContext): void {
@@ -252,6 +276,7 @@ export class ParticlesController {
 
     public initGPUDevice (device: GPUDevice): void {
         this.device = device;
+        this.gpuVSMatricesInitialized = false;
 
         this.gpuShaderModule = device.createShaderModule({
             label: 'particles shader module',
@@ -598,6 +623,7 @@ export class ParticlesController {
                     size: indices.byteLength,
                     usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST
                 });
+                this.device.queue.writeBuffer(emitter.indexGPUBuffer, 0, indices);
             }
         }
     }
@@ -619,8 +645,12 @@ export class ParticlesController {
         this.gl.enableVertexAttribArray(this.shaderProgramLocations.textureCoordAttribute);
         this.gl.enableVertexAttribArray(this.shaderProgramLocations.colorAttribute);
 
-        for (const emitter of this.emitters) {
-            if (emitterIndices && !emitterIndices.includes(emitter.index)) {
+        const emitterCount = emitterIndices?.length ?? this.emitters.length;
+        for (let emitterIndex = 0; emitterIndex < emitterCount; ++emitterIndex) {
+            const emitter = emitterIndices ?
+                this.emittersByIndex[emitterIndices[emitterIndex]] :
+                this.emitters[emitterIndex];
+            if (!emitter) {
                 continue;
             }
             if (!emitter.particles.length) {
@@ -644,23 +674,24 @@ export class ParticlesController {
     }
 
     private renderGPUEmitterType(pass: GPURenderPassEncoder, emitter: ParticleEmitterWrapper, type: ParticleEmitter2FramesFlags): void {
+        const particleCount = emitter.particles.length;
         if (type === ParticleEmitter2FramesFlags.Tail) {
-            this.device.queue.writeBuffer(emitter.tailTexCoordGPUBuffer, 0, emitter.tailTexCoords);
+            this.device.queue.writeBuffer(emitter.tailTexCoordGPUBuffer, 0, emitter.tailTexCoords, 0, particleCount * 8);
             pass.setVertexBuffer(1, emitter.tailTexCoordGPUBuffer);
         } else {
-            this.device.queue.writeBuffer(emitter.headTexCoordGPUBuffer, 0, emitter.headTexCoords);
+            this.device.queue.writeBuffer(emitter.headTexCoordGPUBuffer, 0, emitter.headTexCoords, 0, particleCount * 8);
             pass.setVertexBuffer(1, emitter.headTexCoordGPUBuffer);
         }
 
         if (type === ParticleEmitter2FramesFlags.Tail) {
-            this.device.queue.writeBuffer(emitter.tailVertexGPUBuffer, 0, emitter.tailVertices);
+            this.device.queue.writeBuffer(emitter.tailVertexGPUBuffer, 0, emitter.tailVertices, 0, particleCount * 12);
             pass.setVertexBuffer(0, emitter.tailVertexGPUBuffer);
         } else {
-            this.device.queue.writeBuffer(emitter.headVertexGPUBuffer, 0, emitter.headVertices);
+            this.device.queue.writeBuffer(emitter.headVertexGPUBuffer, 0, emitter.headVertices, 0, particleCount * 12);
             pass.setVertexBuffer(0, emitter.headVertexGPUBuffer);
         }
 
-        pass.drawIndexed(emitter.particles.length * 6);
+        pass.drawIndexed(particleCount * 6);
     }
 
     public renderGPU (
@@ -669,19 +700,27 @@ export class ParticlesController {
         pMatrix: mat4,
         emitterIndices?: readonly number[]
     ): void {
-        const VSUniformsValues = new ArrayBuffer(128);
-        const VSUniformsViews = {
-            mvMatrix: new Float32Array(VSUniformsValues, 0, 16),
-            pMatrix: new Float32Array(VSUniformsValues, 64, 16)
-        };
-        VSUniformsViews.mvMatrix.set(mvMatrix);
-        VSUniformsViews.pMatrix.set(pMatrix);
-        this.device.queue.writeBuffer(this.gpuVSUniformsBuffer, 0, VSUniformsValues);
+        const VSUniformsViews = this.gpuVSUniformsViews;
+        let matricesChanged = !this.gpuVSMatricesInitialized;
+        for (let i = 0; i < 16 && !matricesChanged; ++i) {
+            matricesChanged = VSUniformsViews.mvMatrix[i] !== mvMatrix[i] ||
+                VSUniformsViews.pMatrix[i] !== pMatrix[i];
+        }
+        if (matricesChanged) {
+            VSUniformsViews.mvMatrix.set(mvMatrix);
+            VSUniformsViews.pMatrix.set(pMatrix);
+            this.device.queue.writeBuffer(this.gpuVSUniformsBuffer, 0, this.gpuVSUniformsValues);
+            this.gpuVSMatricesInitialized = true;
+        }
 
         pass.setBindGroup(0, this.gpuVSUniformsBindGroup);
 
-        for (const emitter of this.emitters) {
-            if (emitterIndices && !emitterIndices.includes(emitter.index)) {
+        const emitterCount = emitterIndices?.length ?? this.emitters.length;
+        for (let emitterIndex = 0; emitterIndex < emitterCount; ++emitterIndex) {
+            const emitter = emitterIndices ?
+                this.emittersByIndex[emitterIndices[emitterIndex]] :
+                this.emitters[emitterIndex];
+            if (!emitter) {
                 continue;
             }
             if (!emitter.particles.length) {
@@ -694,26 +733,6 @@ export class ParticlesController {
             const textureID = emitter.props.TextureID;
             const texture = this.rendererData.model.Textures[textureID];
 
-            const fsUniformsValues = new ArrayBuffer(32);
-            const fsUniformsViews = {
-                replaceableColor: new Float32Array(fsUniformsValues, 0, 3),
-                replaceableType: new Uint32Array(fsUniformsValues, 12, 1),
-                discardAlphaLevel: new Float32Array(fsUniformsValues, 16, 1),
-            };
-
-            fsUniformsViews.replaceableColor.set(this.rendererData.teamColor);
-            fsUniformsViews.replaceableType.set([texture.ReplaceableId || 0]);
-            if (emitter.props.FilterMode === ParticleEmitter2FilterMode.AlphaKey) {
-                fsUniformsViews.discardAlphaLevel.set([DISCARD_ALPHA_KEY_LEVEL]);
-            } else if (
-                emitter.props.FilterMode === ParticleEmitter2FilterMode.Modulate ||
-                emitter.props.FilterMode === ParticleEmitter2FilterMode.Modulate2x
-            ) {
-                fsUniformsViews.discardAlphaLevel.set([DISCARD_MODULATE_LEVEL]);
-            } else {
-                fsUniformsViews.discardAlphaLevel.set([0]);
-            }
-
             if (!emitter.fsUniformsBuffer) {
                 emitter.fsUniformsBuffer = this.device.createBuffer({
                     label: `particles fs uniforms ${emitter.index}`,
@@ -722,31 +741,63 @@ export class ParticlesController {
                 });
             }
 
-            this.device.queue.writeBuffer(emitter.fsUniformsBuffer, 0, fsUniformsValues);
+            if (
+                !emitter.fsUniformsInitialized ||
+                emitter.fsTeamColorR !== this.rendererData.teamColor[0] ||
+                emitter.fsTeamColorG !== this.rendererData.teamColor[1] ||
+                emitter.fsTeamColorB !== this.rendererData.teamColor[2]
+            ) {
+                const fsUniformsViews = this.gpuFSUniformsViews;
+                fsUniformsViews.replaceableColor.set(this.rendererData.teamColor);
+                fsUniformsViews.replaceableType[0] = texture.ReplaceableId || 0;
+                if (emitter.props.FilterMode === ParticleEmitter2FilterMode.AlphaKey) {
+                    fsUniformsViews.discardAlphaLevel[0] = DISCARD_ALPHA_KEY_LEVEL;
+                } else if (
+                    emitter.props.FilterMode === ParticleEmitter2FilterMode.Modulate ||
+                    emitter.props.FilterMode === ParticleEmitter2FilterMode.Modulate2x
+                ) {
+                    fsUniformsViews.discardAlphaLevel[0] = DISCARD_MODULATE_LEVEL;
+                } else {
+                    fsUniformsViews.discardAlphaLevel[0] = 0;
+                }
+                this.device.queue.writeBuffer(emitter.fsUniformsBuffer, 0, this.gpuFSUniformsValues);
+                emitter.fsUniformsInitialized = true;
+                emitter.fsTeamColorR = this.rendererData.teamColor[0];
+                emitter.fsTeamColorG = this.rendererData.teamColor[1];
+                emitter.fsTeamColorB = this.rendererData.teamColor[2];
+            }
 
-            const fsUniformsBindGroup = this.device.createBindGroup({
-                label: `particles fs uniforms ${emitter.index}`,
-                layout: this.fsBindGroupLayout,
-                entries: [
-                    {
-                        binding: 0,
-                        resource: { buffer: emitter.fsUniformsBuffer }
-                    },
-                    {
-                        binding: 1,
-                        resource: this.rendererData.gpuSamplers[textureID]
-                    },
-                    {
-                        binding: 2,
-                        resource: (this.rendererData.gpuTextures[texture.Image] || this.rendererData.gpuEmptyTexture).createView()
-                    }
-                ]
-            });
+            const sampler = this.rendererData.gpuSamplers[textureID];
+            const gpuTexture = this.rendererData.gpuTextures[texture.Image] || this.rendererData.gpuEmptyTexture;
+            if (
+                !emitter.fsUniformsBindGroup ||
+                emitter.fsUniformsBoundBuffer !== emitter.fsUniformsBuffer ||
+                emitter.fsUniformsTexture !== gpuTexture ||
+                emitter.fsUniformsSampler !== sampler
+            ) {
+                emitter.fsUniformsBindGroup = this.device.createBindGroup({
+                    label: `particles fs uniforms ${emitter.index}`,
+                    layout: this.fsBindGroupLayout,
+                    entries: [
+                        {binding: 0, resource: {buffer: emitter.fsUniformsBuffer}},
+                        {binding: 1, resource: sampler},
+                        {binding: 2, resource: gpuTexture.createView()}
+                    ]
+                });
+                emitter.fsUniformsBoundBuffer = emitter.fsUniformsBuffer;
+                emitter.fsUniformsTexture = gpuTexture;
+                emitter.fsUniformsSampler = sampler;
+            }
 
-            pass.setBindGroup(1, fsUniformsBindGroup);
+            pass.setBindGroup(1, emitter.fsUniformsBindGroup);
 
-            this.device.queue.writeBuffer(emitter.colorGPUBuffer, 0, emitter.colors);
-            this.device.queue.writeBuffer(emitter.indexGPUBuffer, 0, emitter.indices);
+            this.device.queue.writeBuffer(
+                emitter.colorGPUBuffer,
+                0,
+                emitter.colors,
+                0,
+                emitter.particles.length * 16
+            );
             pass.setVertexBuffer(2, emitter.colorGPUBuffer);
             pass.setIndexBuffer(emitter.indexGPUBuffer, 'uint16');
 
@@ -787,16 +838,17 @@ export class ParticlesController {
         }
 
         if (emitter.particles.length) {
-            const updatedParticles = [];
-            for (const particle of emitter.particles) {
+            let activeParticleCount = 0;
+            for (let i = 0; i < emitter.particles.length; ++i) {
+                const particle = emitter.particles[i];
                 this.updateParticle(particle, delta);
                 if (particle.lifeSpan > 0) {
-                    updatedParticles.push(particle);
+                    emitter.particles[activeParticleCount++] = particle;
                 } else {
                     this.particleStorage.push(particle);
                 }
             }
-            emitter.particles = updatedParticles;
+            emitter.particles.length = activeParticleCount;
 
             if (emitter.type & ParticleEmitter2FramesFlags.Head) {
                 if (emitter.props.Flags & ParticleEmitter2Flags.XYQuad) {
@@ -911,18 +963,19 @@ export class ParticlesController {
         scale = lerp(firstScale, secondScale, t);
 
         if (emitter.type & ParticleEmitter2FramesFlags.Head) {
+            const xyQuad = Boolean(emitter.props.Flags & ParticleEmitter2Flags.XYQuad);
+            const sin = xyQuad ? Math.sin(particle.angle) : 0;
+            const cos = xyQuad ? Math.cos(particle.angle) : 0;
             for (let i = 0; i < 4; ++i) {
                 emitter.headVertices[index * 12 + i * 3]     = this.particleBaseVectors[i][0] * scale;
                 emitter.headVertices[index * 12 + i * 3 + 1] = this.particleBaseVectors[i][1] * scale;
                 emitter.headVertices[index * 12 + i * 3 + 2] = this.particleBaseVectors[i][2] * scale;
 
-                if (emitter.props.Flags & ParticleEmitter2Flags.XYQuad) {
+                if (xyQuad) {
                     const x = emitter.headVertices[index * 12 + i * 3];
                     const y = emitter.headVertices[index * 12 + i * 3 + 1];
-                    emitter.headVertices[index * 12 + i * 3]     = x * Math.cos(particle.angle) -
-                        y * Math.sin(particle.angle);
-                    emitter.headVertices[index * 12 + i * 3 + 1] = x * Math.sin(particle.angle) +
-                        y * Math.cos(particle.angle);
+                    emitter.headVertices[index * 12 + i * 3]     = x * cos - y * sin;
+                    emitter.headVertices[index * 12 + i * 3 + 1] = x * sin + y * cos;
                 }
             }
         }

@@ -4684,19 +4684,6 @@
 		return out;
 	}
 	/**
-	* Creates a new vec3 initialized with values from an existing vector
-	*
-	* @param {ReadonlyVec3} a vector to clone
-	* @returns {vec3} a new 3D vector
-	*/
-	function clone$2(a) {
-		var out = new ARRAY_TYPE(3);
-		out[0] = a[0];
-		out[1] = a[1];
-		out[2] = a[2];
-		return out;
-	}
-	/**
 	* Calculates the length of a vec3
 	*
 	* @param {ReadonlyVec3} a vector to calculate length of
@@ -5587,6 +5574,18 @@
 	var DISCARD_MODULATE_LEVEL = .01;
 	var ParticlesController = class {
 		constructor(interp, rendererData) {
+			this.gpuVSUniformsValues = /* @__PURE__ */ new ArrayBuffer(128);
+			this.gpuVSUniformsViews = {
+				mvMatrix: new Float32Array(this.gpuVSUniformsValues, 0, 16),
+				pMatrix: new Float32Array(this.gpuVSUniformsValues, 64, 16)
+			};
+			this.gpuVSMatricesInitialized = false;
+			this.gpuFSUniformsValues = /* @__PURE__ */ new ArrayBuffer(32);
+			this.gpuFSUniformsViews = {
+				replaceableColor: new Float32Array(this.gpuFSUniformsValues, 0, 3),
+				replaceableType: new Uint32Array(this.gpuFSUniformsValues, 12, 1),
+				discardAlphaLevel: new Float32Array(this.gpuFSUniformsValues, 16, 1)
+			};
 			this.shaderProgramLocations = {
 				vertexPositionAttribute: null,
 				textureCoordAttribute: null,
@@ -5602,6 +5601,7 @@
 			this.interp = interp;
 			this.rendererData = rendererData;
 			this.emitters = [];
+			this.emittersByIndex = [];
 			if (rendererData.model.ParticleEmitters2.length) {
 				this.particleBaseVectors = [
 					create$2(),
@@ -5642,6 +5642,7 @@
 					};
 					emitter.baseCapacity = Math.ceil(ModelInterp.maxAnimVectorVal(emitter.props.EmissionRate) * emitter.props.LifeSpan);
 					this.emitters.push(emitter);
+					this.emittersByIndex[i] = emitter;
 				}
 				this.emitters.sort((left, right) => comparePriorityPlane(left.props.PriorityPlane, left.index, right.props.PriorityPlane, right.index));
 			}
@@ -5686,6 +5687,7 @@
 				if (emitter.fsUniformsBuffer) emitter.fsUniformsBuffer.destroy();
 			}
 			this.emitters = [];
+			this.emittersByIndex = [];
 		}
 		initGL(glContext) {
 			this.gl = glContext;
@@ -5693,6 +5695,7 @@
 		}
 		initGPUDevice(device) {
 			this.device = device;
+			this.gpuVSMatricesInitialized = false;
 			this.gpuShaderModule = device.createShaderModule({
 				label: "particles shader module",
 				code: particles_default
@@ -5997,6 +6000,7 @@
 						size: indices.byteLength,
 						usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST
 					});
+					this.device.queue.writeBuffer(emitter.indexGPUBuffer, 0, indices);
 				}
 			}
 		}
@@ -6011,8 +6015,10 @@
 			this.gl.enableVertexAttribArray(this.shaderProgramLocations.vertexPositionAttribute);
 			this.gl.enableVertexAttribArray(this.shaderProgramLocations.textureCoordAttribute);
 			this.gl.enableVertexAttribArray(this.shaderProgramLocations.colorAttribute);
-			for (const emitter of this.emitters) {
-				if (emitterIndices && !emitterIndices.includes(emitter.index)) continue;
+			const emitterCount = emitterIndices?.length ?? this.emitters.length;
+			for (let emitterIndex = 0; emitterIndex < emitterCount; ++emitterIndex) {
+				const emitter = emitterIndices ? this.emittersByIndex[emitterIndices[emitterIndex]] : this.emitters[emitterIndex];
+				if (!emitter) continue;
 				if (!emitter.particles.length) continue;
 				this.setLayerProps(emitter);
 				this.setGeneralBuffers(emitter);
@@ -6024,77 +6030,88 @@
 			this.gl.disableVertexAttribArray(this.shaderProgramLocations.colorAttribute);
 		}
 		renderGPUEmitterType(pass, emitter, type) {
+			const particleCount = emitter.particles.length;
 			if (type === ParticleEmitter2FramesFlags.Tail) {
-				this.device.queue.writeBuffer(emitter.tailTexCoordGPUBuffer, 0, emitter.tailTexCoords);
+				this.device.queue.writeBuffer(emitter.tailTexCoordGPUBuffer, 0, emitter.tailTexCoords, 0, particleCount * 8);
 				pass.setVertexBuffer(1, emitter.tailTexCoordGPUBuffer);
 			} else {
-				this.device.queue.writeBuffer(emitter.headTexCoordGPUBuffer, 0, emitter.headTexCoords);
+				this.device.queue.writeBuffer(emitter.headTexCoordGPUBuffer, 0, emitter.headTexCoords, 0, particleCount * 8);
 				pass.setVertexBuffer(1, emitter.headTexCoordGPUBuffer);
 			}
 			if (type === ParticleEmitter2FramesFlags.Tail) {
-				this.device.queue.writeBuffer(emitter.tailVertexGPUBuffer, 0, emitter.tailVertices);
+				this.device.queue.writeBuffer(emitter.tailVertexGPUBuffer, 0, emitter.tailVertices, 0, particleCount * 12);
 				pass.setVertexBuffer(0, emitter.tailVertexGPUBuffer);
 			} else {
-				this.device.queue.writeBuffer(emitter.headVertexGPUBuffer, 0, emitter.headVertices);
+				this.device.queue.writeBuffer(emitter.headVertexGPUBuffer, 0, emitter.headVertices, 0, particleCount * 12);
 				pass.setVertexBuffer(0, emitter.headVertexGPUBuffer);
 			}
-			pass.drawIndexed(emitter.particles.length * 6);
+			pass.drawIndexed(particleCount * 6);
 		}
 		renderGPU(pass, mvMatrix, pMatrix, emitterIndices) {
-			const VSUniformsValues = /* @__PURE__ */ new ArrayBuffer(128);
-			const VSUniformsViews = {
-				mvMatrix: new Float32Array(VSUniformsValues, 0, 16),
-				pMatrix: new Float32Array(VSUniformsValues, 64, 16)
-			};
-			VSUniformsViews.mvMatrix.set(mvMatrix);
-			VSUniformsViews.pMatrix.set(pMatrix);
-			this.device.queue.writeBuffer(this.gpuVSUniformsBuffer, 0, VSUniformsValues);
+			const VSUniformsViews = this.gpuVSUniformsViews;
+			let matricesChanged = !this.gpuVSMatricesInitialized;
+			for (let i = 0; i < 16 && !matricesChanged; ++i) matricesChanged = VSUniformsViews.mvMatrix[i] !== mvMatrix[i] || VSUniformsViews.pMatrix[i] !== pMatrix[i];
+			if (matricesChanged) {
+				VSUniformsViews.mvMatrix.set(mvMatrix);
+				VSUniformsViews.pMatrix.set(pMatrix);
+				this.device.queue.writeBuffer(this.gpuVSUniformsBuffer, 0, this.gpuVSUniformsValues);
+				this.gpuVSMatricesInitialized = true;
+			}
 			pass.setBindGroup(0, this.gpuVSUniformsBindGroup);
-			for (const emitter of this.emitters) {
-				if (emitterIndices && !emitterIndices.includes(emitter.index)) continue;
+			const emitterCount = emitterIndices?.length ?? this.emitters.length;
+			for (let emitterIndex = 0; emitterIndex < emitterCount; ++emitterIndex) {
+				const emitter = emitterIndices ? this.emittersByIndex[emitterIndices[emitterIndex]] : this.emitters[emitterIndex];
+				if (!emitter) continue;
 				if (!emitter.particles.length) continue;
 				const pipeline = this.gpuPipelines[emitter.props.FilterMode] || this.gpuPipelines[0];
 				pass.setPipeline(pipeline);
 				const textureID = emitter.props.TextureID;
 				const texture = this.rendererData.model.Textures[textureID];
-				const fsUniformsValues = /* @__PURE__ */ new ArrayBuffer(32);
-				const fsUniformsViews = {
-					replaceableColor: new Float32Array(fsUniformsValues, 0, 3),
-					replaceableType: new Uint32Array(fsUniformsValues, 12, 1),
-					discardAlphaLevel: new Float32Array(fsUniformsValues, 16, 1)
-				};
-				fsUniformsViews.replaceableColor.set(this.rendererData.teamColor);
-				fsUniformsViews.replaceableType.set([texture.ReplaceableId || 0]);
-				if (emitter.props.FilterMode === ParticleEmitter2FilterMode.AlphaKey) fsUniformsViews.discardAlphaLevel.set([DISCARD_ALPHA_KEY_LEVEL]);
-				else if (emitter.props.FilterMode === ParticleEmitter2FilterMode.Modulate || emitter.props.FilterMode === ParticleEmitter2FilterMode.Modulate2x) fsUniformsViews.discardAlphaLevel.set([DISCARD_MODULATE_LEVEL]);
-				else fsUniformsViews.discardAlphaLevel.set([0]);
 				if (!emitter.fsUniformsBuffer) emitter.fsUniformsBuffer = this.device.createBuffer({
 					label: `particles fs uniforms ${emitter.index}`,
 					size: 32,
 					usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
 				});
-				this.device.queue.writeBuffer(emitter.fsUniformsBuffer, 0, fsUniformsValues);
-				const fsUniformsBindGroup = this.device.createBindGroup({
-					label: `particles fs uniforms ${emitter.index}`,
-					layout: this.fsBindGroupLayout,
-					entries: [
-						{
-							binding: 0,
-							resource: { buffer: emitter.fsUniformsBuffer }
-						},
-						{
-							binding: 1,
-							resource: this.rendererData.gpuSamplers[textureID]
-						},
-						{
-							binding: 2,
-							resource: (this.rendererData.gpuTextures[texture.Image] || this.rendererData.gpuEmptyTexture).createView()
-						}
-					]
-				});
-				pass.setBindGroup(1, fsUniformsBindGroup);
-				this.device.queue.writeBuffer(emitter.colorGPUBuffer, 0, emitter.colors);
-				this.device.queue.writeBuffer(emitter.indexGPUBuffer, 0, emitter.indices);
+				if (!emitter.fsUniformsInitialized || emitter.fsTeamColorR !== this.rendererData.teamColor[0] || emitter.fsTeamColorG !== this.rendererData.teamColor[1] || emitter.fsTeamColorB !== this.rendererData.teamColor[2]) {
+					const fsUniformsViews = this.gpuFSUniformsViews;
+					fsUniformsViews.replaceableColor.set(this.rendererData.teamColor);
+					fsUniformsViews.replaceableType[0] = texture.ReplaceableId || 0;
+					if (emitter.props.FilterMode === ParticleEmitter2FilterMode.AlphaKey) fsUniformsViews.discardAlphaLevel[0] = DISCARD_ALPHA_KEY_LEVEL;
+					else if (emitter.props.FilterMode === ParticleEmitter2FilterMode.Modulate || emitter.props.FilterMode === ParticleEmitter2FilterMode.Modulate2x) fsUniformsViews.discardAlphaLevel[0] = DISCARD_MODULATE_LEVEL;
+					else fsUniformsViews.discardAlphaLevel[0] = 0;
+					this.device.queue.writeBuffer(emitter.fsUniformsBuffer, 0, this.gpuFSUniformsValues);
+					emitter.fsUniformsInitialized = true;
+					emitter.fsTeamColorR = this.rendererData.teamColor[0];
+					emitter.fsTeamColorG = this.rendererData.teamColor[1];
+					emitter.fsTeamColorB = this.rendererData.teamColor[2];
+				}
+				const sampler = this.rendererData.gpuSamplers[textureID];
+				const gpuTexture = this.rendererData.gpuTextures[texture.Image] || this.rendererData.gpuEmptyTexture;
+				if (!emitter.fsUniformsBindGroup || emitter.fsUniformsBoundBuffer !== emitter.fsUniformsBuffer || emitter.fsUniformsTexture !== gpuTexture || emitter.fsUniformsSampler !== sampler) {
+					emitter.fsUniformsBindGroup = this.device.createBindGroup({
+						label: `particles fs uniforms ${emitter.index}`,
+						layout: this.fsBindGroupLayout,
+						entries: [
+							{
+								binding: 0,
+								resource: { buffer: emitter.fsUniformsBuffer }
+							},
+							{
+								binding: 1,
+								resource: sampler
+							},
+							{
+								binding: 2,
+								resource: gpuTexture.createView()
+							}
+						]
+					});
+					emitter.fsUniformsBoundBuffer = emitter.fsUniformsBuffer;
+					emitter.fsUniformsTexture = gpuTexture;
+					emitter.fsUniformsSampler = sampler;
+				}
+				pass.setBindGroup(1, emitter.fsUniformsBindGroup);
+				this.device.queue.writeBuffer(emitter.colorGPUBuffer, 0, emitter.colors, 0, emitter.particles.length * 16);
 				pass.setVertexBuffer(2, emitter.colorGPUBuffer);
 				pass.setIndexBuffer(emitter.indexGPUBuffer, "uint16");
 				if (emitter.type & ParticleEmitter2FramesFlags.Tail) this.renderGPUEmitterType(pass, emitter, ParticleEmitter2FramesFlags.Tail);
@@ -6119,13 +6136,14 @@
 				}
 			}
 			if (emitter.particles.length) {
-				const updatedParticles = [];
-				for (const particle of emitter.particles) {
+				let activeParticleCount = 0;
+				for (let i = 0; i < emitter.particles.length; ++i) {
+					const particle = emitter.particles[i];
 					this.updateParticle(particle, delta);
-					if (particle.lifeSpan > 0) updatedParticles.push(particle);
+					if (particle.lifeSpan > 0) emitter.particles[activeParticleCount++] = particle;
 					else this.particleStorage.push(particle);
 				}
-				emitter.particles = updatedParticles;
+				emitter.particles.length = activeParticleCount;
 				if (emitter.type & ParticleEmitter2FramesFlags.Head) if (emitter.props.Flags & ParticleEmitter2Flags.XYQuad) {
 					set$2(this.particleBaseVectors[0], -1, 1, 0);
 					set$2(this.particleBaseVectors[1], -1, -1, 0);
@@ -6199,15 +6217,20 @@
 				secondScale = emitter.props.ParticleScaling[2];
 			}
 			scale = lerp(firstScale, secondScale, t);
-			if (emitter.type & ParticleEmitter2FramesFlags.Head) for (let i = 0; i < 4; ++i) {
-				emitter.headVertices[index * 12 + i * 3] = this.particleBaseVectors[i][0] * scale;
-				emitter.headVertices[index * 12 + i * 3 + 1] = this.particleBaseVectors[i][1] * scale;
-				emitter.headVertices[index * 12 + i * 3 + 2] = this.particleBaseVectors[i][2] * scale;
-				if (emitter.props.Flags & ParticleEmitter2Flags.XYQuad) {
-					const x = emitter.headVertices[index * 12 + i * 3];
-					const y = emitter.headVertices[index * 12 + i * 3 + 1];
-					emitter.headVertices[index * 12 + i * 3] = x * Math.cos(particle.angle) - y * Math.sin(particle.angle);
-					emitter.headVertices[index * 12 + i * 3 + 1] = x * Math.sin(particle.angle) + y * Math.cos(particle.angle);
+			if (emitter.type & ParticleEmitter2FramesFlags.Head) {
+				const xyQuad = Boolean(emitter.props.Flags & ParticleEmitter2Flags.XYQuad);
+				const sin = xyQuad ? Math.sin(particle.angle) : 0;
+				const cos = xyQuad ? Math.cos(particle.angle) : 0;
+				for (let i = 0; i < 4; ++i) {
+					emitter.headVertices[index * 12 + i * 3] = this.particleBaseVectors[i][0] * scale;
+					emitter.headVertices[index * 12 + i * 3 + 1] = this.particleBaseVectors[i][1] * scale;
+					emitter.headVertices[index * 12 + i * 3 + 2] = this.particleBaseVectors[i][2] * scale;
+					if (xyQuad) {
+						const x = emitter.headVertices[index * 12 + i * 3];
+						const y = emitter.headVertices[index * 12 + i * 3 + 1];
+						emitter.headVertices[index * 12 + i * 3] = x * cos - y * sin;
+						emitter.headVertices[index * 12 + i * 3 + 1] = x * sin + y * cos;
+					}
 				}
 			}
 			if (emitter.type & ParticleEmitter2FramesFlags.Tail) {
@@ -6380,8 +6403,23 @@
 	var ribbons_default = "struct VSUniforms {\r\n    mvMatrix: mat4x4f,\r\n    pMatrix: mat4x4f,\r\n}\r\n\r\nstruct FSUniforms {\r\n    replaceableColor: vec3f,\r\n    replaceableType: u32,\r\n    discardAlphaLevel: f32,\r\n    color: vec4f,\r\n}\r\n\r\n@group(0) @binding(0) var<uniform> vsUniforms: VSUniforms;\r\n@group(1) @binding(0) var<uniform> fsUniforms: FSUniforms;\r\n@group(1) @binding(1) var fsUniformSampler: sampler;\r\n@group(1) @binding(2) var fsUniformTexture: texture_2d<f32>;\r\n\r\nstruct VSIn {\r\n    @location(0) vertexPosition: vec3f,\r\n    @location(1) textureCoord: vec2f,\r\n}\r\n\r\nstruct VSOut {\r\n    @builtin(position) position: vec4f,\r\n    @location(0) textureCoord: vec2f,\r\n}\r\n\r\n@vertex fn vs(\r\n    in: VSIn\r\n) -> VSOut {\r\n    var position: vec4f = vec4f(in.vertexPosition, 1.0);\r\n\r\n    var out: VSOut;\r\n    out.position = vsUniforms.pMatrix * vsUniforms.mvMatrix * position;\r\n    out.textureCoord = in.textureCoord;\r\n    return out;\r\n}\r\n\r\nfn hypot(z: vec2f) -> f32 {\r\n    var t: f32 = 0;\r\n    var x: f32 = abs(z.x);\r\n    let y: f32 = abs(z.y);\r\n    t = min(x, y);\r\n    x = max(x, y);\r\n    t = t / x;\r\n    if (z.x == 0.0 && z.y == 0.0) {\r\n        return 0.0;\r\n    }\r\n    return x * sqrt(1.0 + t * t);\r\n}\r\n\r\n@fragment fn fs(\r\n    in: VSOut\r\n) -> @location(0) vec4f {\r\n    let texCoord: vec2f = in.textureCoord;\r\n    var color: vec4f = vec4f(0.0);\r\n\r\n    if (fsUniforms.replaceableType == 0) {\r\n        color = textureSample(fsUniformTexture, fsUniformSampler, texCoord);\r\n    } else if (fsUniforms.replaceableType == 1) {\r\n        color = vec4f(fsUniforms.replaceableColor, 1.0);\r\n    } else if (fsUniforms.replaceableType == 2) {\r\n        let dist: f32 = hypot(texCoord - vec2(0.5, 0.5)) * 2.;\r\n        let truncateDist: f32 = clamp(1. - dist * 1.4, 0., 1.);\r\n        let alpha: f32 = sin(truncateDist);\r\n        color = vec4f(fsUniforms.replaceableColor * alpha, 1.0);\r\n    }\r\n\r\n    color *= fsUniforms.color;\r\n\r\n    // hand-made alpha-test\r\n    if (color.a < fsUniforms.discardAlphaLevel) {\r\n        discard;\r\n    }\r\n\r\n    return color;\r\n}\r\n";
 	//#endregion
 	//#region renderer/ribbons.ts
+	var firstVertex = create$2();
+	var secondVertex = create$2();
 	var RibbonsController = class {
 		constructor(interp, rendererData) {
+			this.gpuVSUniformsValues = /* @__PURE__ */ new ArrayBuffer(128);
+			this.gpuVSUniformsViews = {
+				mvMatrix: new Float32Array(this.gpuVSUniformsValues, 0, 16),
+				pMatrix: new Float32Array(this.gpuVSUniformsValues, 64, 16)
+			};
+			this.gpuVSMatricesInitialized = false;
+			this.gpuFSUniformsValues = /* @__PURE__ */ new ArrayBuffer(48);
+			this.gpuFSUniformsViews = {
+				replaceableColor: new Float32Array(this.gpuFSUniformsValues, 0, 3),
+				replaceableType: new Uint32Array(this.gpuFSUniformsValues, 12, 1),
+				discardAlphaLevel: new Float32Array(this.gpuFSUniformsValues, 16, 1),
+				color: new Float32Array(this.gpuFSUniformsValues, 32, 4)
+			};
 			this.shaderProgramLocations = {
 				vertexPositionAttribute: null,
 				textureCoordAttribute: null,
@@ -6396,6 +6434,7 @@
 			this.interp = interp;
 			this.rendererData = rendererData;
 			this.emitters = [];
+			this.emittersByIndex = [];
 			if (rendererData.model.RibbonEmitters.length) {
 				for (let i = 0; i < rendererData.model.RibbonEmitters.length; ++i) {
 					const ribbonEmitter = rendererData.model.RibbonEmitters[i];
@@ -6412,10 +6451,15 @@
 						texCoords: null,
 						texCoordBuffer: null,
 						texCoordGPUBuffer: null,
-						fsUnifrmsPerLayer: []
+						fsUnifrmsPerLayer: [],
+						fsBindGroupsPerLayer: [],
+						fsBoundBuffersPerLayer: [],
+						fsTexturesPerLayer: [],
+						fsSamplersPerLayer: []
 					};
 					emitter.baseCapacity = Math.ceil(ModelInterp.maxAnimVectorVal(emitter.props.EmissionRate) * emitter.props.LifeSpan) + 1;
 					this.emitters.push(emitter);
+					this.emittersByIndex[i] = emitter;
 				}
 				this.emitters.sort((left, right) => {
 					const leftPriority = rendererData.model.Materials[left.props.MaterialID]?.PriorityPlane ?? 0;
@@ -6453,6 +6497,7 @@
 				for (const buffer of emitter.fsUnifrmsPerLayer) buffer?.destroy();
 			}
 			this.emitters = [];
+			this.emittersByIndex = [];
 		}
 		initGL(glContext) {
 			this.gl = glContext;
@@ -6460,6 +6505,7 @@
 		}
 		initGPUDevice(device) {
 			this.device = device;
+			this.gpuVSMatricesInitialized = false;
 			this.gpuShaderModule = device.createShaderModule({
 				label: "ribbons shader module",
 				code: ribbons_default
@@ -6677,8 +6723,10 @@
 			this.gl.uniformMatrix4fv(this.shaderProgramLocations.mvMatrixUniform, false, mvMatrix);
 			this.gl.enableVertexAttribArray(this.shaderProgramLocations.vertexPositionAttribute);
 			this.gl.enableVertexAttribArray(this.shaderProgramLocations.textureCoordAttribute);
-			for (const emitter of this.emitters) {
-				if (emitterIndices && !emitterIndices.includes(emitter.index)) continue;
+			const emitterCount = emitterIndices?.length ?? this.emitters.length;
+			for (let emitterIndex = 0; emitterIndex < emitterCount; ++emitterIndex) {
+				const emitter = emitterIndices ? this.emittersByIndex[emitterIndices[emitterIndex]] : this.emitters[emitterIndex];
+				if (!emitter) continue;
 				if (emitter.creationTimes.length < 2) continue;
 				this.gl.uniform4f(this.shaderProgramLocations.colorUniform, emitter.props.Color[0], emitter.props.Color[1], emitter.props.Color[2], this.interp.animVectorVal(emitter.props.Alpha, 1));
 				this.setGeneralBuffers(emitter);
@@ -6693,19 +6741,22 @@
 			this.gl.disableVertexAttribArray(this.shaderProgramLocations.textureCoordAttribute);
 		}
 		renderGPU(pass, mvMatrix, pMatrix, emitterIndices) {
-			const VSUniformsValues = /* @__PURE__ */ new ArrayBuffer(128);
-			const VSUniformsViews = {
-				mvMatrix: new Float32Array(VSUniformsValues, 0, 16),
-				pMatrix: new Float32Array(VSUniformsValues, 64, 16)
-			};
-			VSUniformsViews.mvMatrix.set(mvMatrix);
-			VSUniformsViews.pMatrix.set(pMatrix);
-			this.device.queue.writeBuffer(this.gpuVSUniformsBuffer, 0, VSUniformsValues);
-			for (const emitter of this.emitters) {
-				if (emitterIndices && !emitterIndices.includes(emitter.index)) continue;
+			const VSUniformsViews = this.gpuVSUniformsViews;
+			let matricesChanged = !this.gpuVSMatricesInitialized;
+			for (let i = 0; i < 16 && !matricesChanged; ++i) matricesChanged = VSUniformsViews.mvMatrix[i] !== mvMatrix[i] || VSUniformsViews.pMatrix[i] !== pMatrix[i];
+			if (matricesChanged) {
+				VSUniformsViews.mvMatrix.set(mvMatrix);
+				VSUniformsViews.pMatrix.set(pMatrix);
+				this.device.queue.writeBuffer(this.gpuVSUniformsBuffer, 0, this.gpuVSUniformsValues);
+				this.gpuVSMatricesInitialized = true;
+			}
+			const emitterCount = emitterIndices?.length ?? this.emitters.length;
+			for (let emitterIndex = 0; emitterIndex < emitterCount; ++emitterIndex) {
+				const emitter = emitterIndices ? this.emittersByIndex[emitterIndices[emitterIndex]] : this.emitters[emitterIndex];
+				if (!emitter) continue;
 				if (emitter.creationTimes.length < 2) continue;
-				this.device.queue.writeBuffer(emitter.vertexGPUBuffer, 0, emitter.vertices);
-				this.device.queue.writeBuffer(emitter.texCoordGPUBuffer, 0, emitter.texCoords);
+				this.device.queue.writeBuffer(emitter.vertexGPUBuffer, 0, emitter.vertices, 0, emitter.creationTimes.length * 6);
+				this.device.queue.writeBuffer(emitter.texCoordGPUBuffer, 0, emitter.texCoords, 0, emitter.creationTimes.length * 4);
 				pass.setVertexBuffer(0, emitter.vertexGPUBuffer);
 				pass.setVertexBuffer(1, emitter.texCoordGPUBuffer);
 				pass.setBindGroup(0, this.gpuVSUniformsBindGroup);
@@ -6717,48 +6768,47 @@
 					const layer = material.Layers[j];
 					const pipeline = this.gpuPipelines[layer.FilterMode] || this.gpuPipelines[0];
 					pass.setPipeline(pipeline);
-					const fsUniformsValues = /* @__PURE__ */ new ArrayBuffer(48);
-					const fsUniformsViews = {
-						replaceableColor: new Float32Array(fsUniformsValues, 0, 3),
-						replaceableType: new Uint32Array(fsUniformsValues, 12, 1),
-						discardAlphaLevel: new Float32Array(fsUniformsValues, 16, 1),
-						color: new Float32Array(fsUniformsValues, 32, 4)
-					};
+					const fsUniformsViews = this.gpuFSUniformsViews;
 					fsUniformsViews.replaceableColor.set(this.rendererData.teamColor);
-					fsUniformsViews.replaceableType.set([texture.ReplaceableId || 0]);
-					fsUniformsViews.discardAlphaLevel.set([getLayerDiscardAlphaLevel(layer.FilterMode)]);
-					fsUniformsViews.color.set([
-						emitter.props.Color[0],
-						emitter.props.Color[1],
-						emitter.props.Color[2],
-						this.interp.animVectorVal(emitter.props.Alpha, 1)
-					]);
+					fsUniformsViews.replaceableType[0] = texture.ReplaceableId || 0;
+					fsUniformsViews.discardAlphaLevel[0] = getLayerDiscardAlphaLevel(layer.FilterMode);
+					fsUniformsViews.color[0] = emitter.props.Color[0];
+					fsUniformsViews.color[1] = emitter.props.Color[1];
+					fsUniformsViews.color[2] = emitter.props.Color[2];
+					fsUniformsViews.color[3] = this.interp.animVectorVal(emitter.props.Alpha, 1);
 					if (!emitter.fsUnifrmsPerLayer[j]) emitter.fsUnifrmsPerLayer[j] = this.device.createBuffer({
 						label: `ribbons fs uniforms ${emitter.index} layer ${j}`,
 						size: 48,
 						usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
 					});
 					const fsUniformsBuffer = emitter.fsUnifrmsPerLayer[j];
-					this.device.queue.writeBuffer(fsUniformsBuffer, 0, fsUniformsValues);
-					const fsUniformsBindGroup = this.device.createBindGroup({
-						label: `ribbons fs uniforms ${emitter.index}`,
-						layout: this.fsBindGroupLayout,
-						entries: [
-							{
-								binding: 0,
-								resource: { buffer: fsUniformsBuffer }
-							},
-							{
-								binding: 1,
-								resource: this.rendererData.gpuSamplers[textureID]
-							},
-							{
-								binding: 2,
-								resource: (this.rendererData.gpuTextures[texture.Image] || this.rendererData.gpuEmptyTexture).createView()
-							}
-						]
-					});
-					pass.setBindGroup(1, fsUniformsBindGroup);
+					this.device.queue.writeBuffer(fsUniformsBuffer, 0, this.gpuFSUniformsValues);
+					const sampler = this.rendererData.gpuSamplers[textureID];
+					const gpuTexture = this.rendererData.gpuTextures[texture.Image] || this.rendererData.gpuEmptyTexture;
+					if (!emitter.fsBindGroupsPerLayer[j] || emitter.fsBoundBuffersPerLayer[j] !== fsUniformsBuffer || emitter.fsTexturesPerLayer[j] !== gpuTexture || emitter.fsSamplersPerLayer[j] !== sampler) {
+						emitter.fsBindGroupsPerLayer[j] = this.device.createBindGroup({
+							label: `ribbons fs uniforms ${emitter.index} layer ${j}`,
+							layout: this.fsBindGroupLayout,
+							entries: [
+								{
+									binding: 0,
+									resource: { buffer: fsUniformsBuffer }
+								},
+								{
+									binding: 1,
+									resource: sampler
+								},
+								{
+									binding: 2,
+									resource: gpuTexture.createView()
+								}
+							]
+						});
+						emitter.fsBoundBuffersPerLayer[j] = fsUniformsBuffer;
+						emitter.fsTexturesPerLayer[j] = gpuTexture;
+						emitter.fsSamplersPerLayer[j] = sampler;
+					}
+					pass.setBindGroup(1, emitter.fsBindGroupsPerLayer[j]);
 					pass.draw(emitter.creationTimes.length * 2);
 				}
 			}
@@ -6784,7 +6834,7 @@
 		}
 		resizeEmitterBuffers(emitter, size) {
 			if (size <= emitter.capacity) return;
-			size = Math.min(size, emitter.baseCapacity);
+			size = Math.max(size, emitter.baseCapacity);
 			const vertices = new Float32Array(size * 2 * 3);
 			const texCoords = new Float32Array(size * 2 * 2);
 			if (emitter.vertices) vertices.set(emitter.vertices);
@@ -6823,22 +6873,21 @@
 					emitter.creationTimes.push(now);
 				}
 			}
-			if (emitter.creationTimes.length) while (emitter.creationTimes[0] + emitter.props.LifeSpan * 1e3 < now) {
-				emitter.creationTimes.shift();
-				for (let i = 0; i + 6 + 5 < emitter.vertices.length; i += 6) {
-					emitter.vertices[i] = emitter.vertices[i + 6];
-					emitter.vertices[i + 1] = emitter.vertices[i + 7];
-					emitter.vertices[i + 2] = emitter.vertices[i + 8];
-					emitter.vertices[i + 3] = emitter.vertices[i + 9];
-					emitter.vertices[i + 4] = emitter.vertices[i + 10];
-					emitter.vertices[i + 5] = emitter.vertices[i + 11];
+			if (emitter.creationTimes.length) {
+				let expiredCount = 0;
+				while (expiredCount < emitter.creationTimes.length && emitter.creationTimes[expiredCount] + emitter.props.LifeSpan * 1e3 < now) ++expiredCount;
+				if (expiredCount) {
+					const remainingCount = emitter.creationTimes.length - expiredCount;
+					for (let i = 0; i < remainingCount; ++i) emitter.creationTimes[i] = emitter.creationTimes[i + expiredCount];
+					emitter.creationTimes.length = remainingCount;
+					emitter.vertices.copyWithin(0, expiredCount * 6, (expiredCount + remainingCount) * 6);
 				}
 			}
 			if (emitter.creationTimes.length) this.updateEmitterTexCoords(emitter, now);
 		}
 		appendVertices(emitter) {
-			const first = clone$2(emitter.props.PivotPoint);
-			const second = clone$2(emitter.props.PivotPoint);
+			const first = copy$2(firstVertex, emitter.props.PivotPoint);
+			const second = copy$2(secondVertex, emitter.props.PivotPoint);
 			first[1] -= this.interp.animVectorVal(emitter.props.HeightBelow, 0);
 			second[1] += this.interp.animVectorVal(emitter.props.HeightAbove, 0);
 			const emitterMatrix = this.rendererData.nodes[emitter.props.ObjectId].matrix;
@@ -6853,13 +6902,13 @@
 			emitter.vertices[currentSize * 6 + 5] = second[2];
 		}
 		updateEmitterTexCoords(emitter, now) {
+			const textureSlot = this.interp.animVectorVal(emitter.props.TextureSlot, 0);
+			const texCoordX = textureSlot % emitter.props.Columns;
+			const texCoordY = Math.floor(textureSlot / emitter.props.Rows);
+			const cellWidth = 1 / emitter.props.Columns;
+			const cellHeight = 1 / emitter.props.Rows;
 			for (let i = 0; i < emitter.creationTimes.length; ++i) {
 				let relativePos = (now - emitter.creationTimes[i]) / (emitter.props.LifeSpan * 1e3);
-				const textureSlot = this.interp.animVectorVal(emitter.props.TextureSlot, 0);
-				const texCoordX = textureSlot % emitter.props.Columns;
-				const texCoordY = Math.floor(textureSlot / emitter.props.Rows);
-				const cellWidth = 1 / emitter.props.Columns;
-				const cellHeight = 1 / emitter.props.Rows;
 				relativePos = texCoordX * cellWidth + relativePos * cellWidth;
 				emitter.texCoords[i * 2 * 2] = relativePos;
 				emitter.texCoords[i * 2 * 2 + 1] = texCoordY * cellHeight;
@@ -7158,6 +7207,17 @@
 	var identifyMat3 = create$4();
 	var texCoordMat4 = create$3();
 	var texCoordMat3 = create$4();
+	function writePaddedMat3(out, value) {
+		out[0] = value[0];
+		out[1] = value[1];
+		out[2] = value[2];
+		out[4] = value[3];
+		out[5] = value[4];
+		out[6] = value[5];
+		out[8] = value[6];
+		out[9] = value[7];
+		out[10] = value[8];
+	}
 	var GPU_LAYER_PROPS = [
 		[
 			"none",
@@ -7319,6 +7379,12 @@
 			this.groupBuffer = [];
 			this.skinWeightBuffer = [];
 			this.tangentBuffer = [];
+			this.envFSBindGroupCache = {};
+			this.envVSUniformsValues = /* @__PURE__ */ new ArrayBuffer(128);
+			this.envVSUniformsViews = {
+				mvMatrix: new Float32Array(this.envVSUniformsValues, 0, 16),
+				pMatrix: new Float32Array(this.envVSUniformsValues, 64, 16)
+			};
 			this.gpuVertexBuffer = [];
 			this.gpuNormalBuffer = [];
 			this.gpuTexCoordBuffer = [];
@@ -7327,6 +7393,36 @@
 			this.gpuSkinWeightBuffer = [];
 			this.gpuTangentBuffer = [];
 			this.gpuFSUniformsBuffers = [];
+			this.gpuSDBindGroupCache = [];
+			this.gpuHDBindGroupCache = [];
+			this.gpuVSUniformsValues = /* @__PURE__ */ new ArrayBuffer(128 + 64 * MAX_NODES);
+			this.gpuVSUniformsViews = {
+				mvMatrix: new Float32Array(this.gpuVSUniformsValues, 0, 16),
+				pMatrix: new Float32Array(this.gpuVSUniformsValues, 64, 16),
+				nodesMatrices: new Float32Array(this.gpuVSUniformsValues, 128, 16 * MAX_NODES)
+			};
+			this.gpuSDFSUniformsValues = /* @__PURE__ */ new ArrayBuffer(80);
+			this.gpuSDFSUniformsViews = {
+				replaceableColor: new Float32Array(this.gpuSDFSUniformsValues, 0, 3),
+				replaceableType: new Uint32Array(this.gpuSDFSUniformsValues, 12, 1),
+				discardAlphaLevel: new Float32Array(this.gpuSDFSUniformsValues, 16, 1),
+				wireframe: new Uint32Array(this.gpuSDFSUniformsValues, 20, 1),
+				alpha: new Float32Array(this.gpuSDFSUniformsValues, 24, 1),
+				tVertexAnim: new Float32Array(this.gpuSDFSUniformsValues, 32, 12)
+			};
+			this.gpuHDFSUniformsValues = /* @__PURE__ */ new ArrayBuffer(192);
+			this.gpuHDFSUniformsViews = {
+				replaceableColor: new Float32Array(this.gpuHDFSUniformsValues, 0, 3),
+				discardAlphaLevel: new Float32Array(this.gpuHDFSUniformsValues, 12, 1),
+				tVertexAnim: new Float32Array(this.gpuHDFSUniformsValues, 16, 12),
+				lightPos: new Float32Array(this.gpuHDFSUniformsValues, 64, 3),
+				hasEnv: new Uint32Array(this.gpuHDFSUniformsValues, 76, 1),
+				lightColor: new Float32Array(this.gpuHDFSUniformsValues, 80, 3),
+				wireframe: new Uint32Array(this.gpuHDFSUniformsValues, 92, 1),
+				cameraPos: new Float32Array(this.gpuHDFSUniformsValues, 96, 3),
+				shadowParams: new Float32Array(this.gpuHDFSUniformsValues, 112, 3),
+				shadowMapLightMatrix: new Float32Array(this.gpuHDFSUniformsValues, 128, 16)
+			};
 			this.isHD = model.Geosets?.some((it) => it.SkinWeights?.length > 0);
 			this.shaderProgramLocations = {
 				vertexPositionAttribute: null,
@@ -7574,6 +7670,9 @@
 			this.canvas = canvas;
 			this.device = device;
 			this.gpuContext = context;
+			this.gpuSDBindGroupCache = [];
+			this.gpuHDBindGroupCache = [];
+			this.envFSBindGroupCache = {};
 			this.initRequiredEnvMaps();
 			this.initGPUShaders();
 			this.initGPUPipeline();
@@ -7718,6 +7817,10 @@
 			return this.rendererData.animation;
 		}
 		setFrame(frame) {
+			if (this.rendererData.animationInfo && this.rendererData.animationInfo.Interval[0] <= frame && this.rendererData.animationInfo.Interval[1] >= frame) {
+				this.rendererData.frame = frame;
+				return;
+			}
 			const index = this.model.Sequences.findIndex((it) => it.Interval[0] <= frame && it.Interval[1] >= frame);
 			if (index < 0) return;
 			this.rendererData.animation = index;
@@ -7789,16 +7892,11 @@
 				const encoder = this.device.createCommandEncoder();
 				const pass = encoder.beginRenderPass(renderPassDescriptor);
 				if (env) this.renderEnvironmentGPU(pass, mvMatrix, pMatrix);
-				const VSUniformsValues = /* @__PURE__ */ new ArrayBuffer(128 + 64 * MAX_NODES);
-				const VSUniformsViews = {
-					mvMatrix: new Float32Array(VSUniformsValues, 0, 16),
-					pMatrix: new Float32Array(VSUniformsValues, 64, 16),
-					nodesMatrices: new Float32Array(VSUniformsValues, 128, 16 * MAX_NODES)
-				};
+				const VSUniformsViews = this.gpuVSUniformsViews;
 				VSUniformsViews.mvMatrix.set(mvMatrix);
 				VSUniformsViews.pMatrix.set(pMatrix);
 				for (let j = 0; j < MAX_NODES; ++j) if (this.rendererData.nodes[j]) VSUniformsViews.nodesMatrices.set(this.rendererData.nodes[j].matrix, j * 16);
-				this.device.queue.writeBuffer(this.gpuVSUniformsBuffer, 0, VSUniformsValues);
+				this.device.queue.writeBuffer(this.gpuVSUniformsBuffer, 0, this.gpuVSUniformsValues);
 				for (const group of this.renderGroups) {
 					if (group.kind === "particle") {
 						if (!depthTextureTarget) this.particlesController.renderGPU(pass, mvMatrix, pMatrix, group.indices);
@@ -7854,128 +7952,26 @@
 								usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
 							});
 							const tVetexAnim = this.getTexCoordMatrix(baseLayer);
-							const FSUniformsValues = /* @__PURE__ */ new ArrayBuffer(192);
-							const FSUniformsViews = {
-								replaceableColor: new Float32Array(FSUniformsValues, 0, 3),
-								discardAlphaLevel: new Float32Array(FSUniformsValues, 12, 1),
-								tVertexAnim: new Float32Array(FSUniformsValues, 16, 12),
-								lightPos: new Float32Array(FSUniformsValues, 64, 3),
-								hasEnv: new Uint32Array(FSUniformsValues, 76, 1),
-								lightColor: new Float32Array(FSUniformsValues, 80, 3),
-								wireframe: new Uint32Array(FSUniformsValues, 92, 1),
-								cameraPos: new Float32Array(FSUniformsValues, 96, 3),
-								shadowParams: new Float32Array(FSUniformsValues, 112, 3),
-								shadowMapLightMatrix: new Float32Array(FSUniformsValues, 128, 16)
-							};
+							const FSUniformsViews = this.gpuHDFSUniformsViews;
 							FSUniformsViews.replaceableColor.set(this.rendererData.teamColor);
-							FSUniformsViews.discardAlphaLevel.set([getLayerDiscardAlphaLevel(baseLayer.FilterMode)]);
-							FSUniformsViews.tVertexAnim.set(tVetexAnim.slice(0, 3));
-							FSUniformsViews.tVertexAnim.set(tVetexAnim.slice(3, 6), 4);
-							FSUniformsViews.tVertexAnim.set(tVetexAnim.slice(6, 9), 8);
+							FSUniformsViews.discardAlphaLevel[0] = getLayerDiscardAlphaLevel(baseLayer.FilterMode);
+							writePaddedMat3(FSUniformsViews.tVertexAnim, tVetexAnim);
 							FSUniformsViews.lightPos.set(this.rendererData.lightPos);
 							FSUniformsViews.lightColor.set(this.rendererData.lightColor);
 							FSUniformsViews.cameraPos.set(this.rendererData.cameraPos);
 							if (shadowMapTexture && shadowMapMatrix) {
-								FSUniformsViews.shadowParams.set([
-									1,
-									shadowBias ?? 1e-6,
-									shadowSmoothingStep ?? 1 / 1024
-								]);
+								FSUniformsViews.shadowParams[0] = 1;
+								FSUniformsViews.shadowParams[1] = shadowBias ?? 1e-6;
+								FSUniformsViews.shadowParams[2] = shadowSmoothingStep ?? 1 / 1024;
 								FSUniformsViews.shadowMapLightMatrix.set(shadowMapMatrix);
 							} else {
-								FSUniformsViews.shadowParams.set([
-									0,
-									0,
-									0
-								]);
-								FSUniformsViews.shadowMapLightMatrix.set([
-									0,
-									0,
-									0,
-									0,
-									0,
-									0,
-									0,
-									0,
-									0,
-									0,
-									0,
-									0,
-									0,
-									0,
-									0,
-									0
-								]);
+								FSUniformsViews.shadowParams.fill(0);
+								FSUniformsViews.shadowMapLightMatrix.fill(0);
 							}
-							FSUniformsViews.hasEnv.set([hasEnv ? 1 : 0]);
-							FSUniformsViews.wireframe.set([wireframe ? 1 : 0]);
-							this.device.queue.writeBuffer(gpuFSUniformsBuffer, 0, FSUniformsValues);
-							const fsBindGroup = this.device.createBindGroup({
-								label: `fs uniforms geoset ${i}`,
-								layout: this.fsBindGroupLayout,
-								entries: [
-									{
-										binding: 0,
-										resource: { buffer: gpuFSUniformsBuffer }
-									},
-									{
-										binding: 1,
-										resource: this.rendererData.gpuSamplers[diffuseTextureID]
-									},
-									{
-										binding: 2,
-										resource: (this.rendererData.gpuTextures[diffuseTexture.Image] || this.rendererData.gpuEmptyTexture).createView()
-									},
-									{
-										binding: 3,
-										resource: this.rendererData.gpuSamplers[normalTextureID]
-									},
-									{
-										binding: 4,
-										resource: (this.rendererData.gpuTextures[normalTexture.Image] || this.rendererData.gpuEmptyTexture).createView()
-									},
-									{
-										binding: 5,
-										resource: this.rendererData.gpuSamplers[ormTextureID]
-									},
-									{
-										binding: 6,
-										resource: (this.rendererData.gpuTextures[ormTexture.Image] || this.rendererData.gpuEmptyTexture).createView()
-									},
-									{
-										binding: 7,
-										resource: this.rendererData.gpuDepthSampler
-									},
-									{
-										binding: 8,
-										resource: (shadowMapTexture || this.rendererData.gpuDepthEmptyTexture).createView()
-									},
-									{
-										binding: 9,
-										resource: this.prefilterEnvSampler
-									},
-									{
-										binding: 10,
-										resource: (irradianceMap || this.rendererData.gpuEmptyCubeTexture).createView({ dimension: "cube" })
-									},
-									{
-										binding: 11,
-										resource: this.prefilterEnvSampler
-									},
-									{
-										binding: 12,
-										resource: (prefilteredEnv || this.rendererData.gpuEmptyCubeTexture).createView({ dimension: "cube" })
-									},
-									{
-										binding: 13,
-										resource: this.gpuBrdfSampler
-									},
-									{
-										binding: 14,
-										resource: this.gpuBrdfLUT.createView()
-									}
-								]
-							});
+							FSUniformsViews.hasEnv[0] = hasEnv ? 1 : 0;
+							FSUniformsViews.wireframe[0] = wireframe ? 1 : 0;
+							this.device.queue.writeBuffer(gpuFSUniformsBuffer, 0, this.gpuHDFSUniformsValues);
+							const fsBindGroup = this.getGPUHDBindGroup(i, gpuFSUniformsBuffer, this.rendererData.gpuSamplers[diffuseTextureID], this.rendererData.gpuTextures[diffuseTexture.Image] || this.rendererData.gpuEmptyTexture, this.rendererData.gpuSamplers[normalTextureID], this.rendererData.gpuTextures[normalTexture.Image] || this.rendererData.gpuEmptyTexture, this.rendererData.gpuSamplers[ormTextureID], this.rendererData.gpuTextures[ormTexture.Image] || this.rendererData.gpuEmptyTexture, shadowMapTexture || this.rendererData.gpuDepthEmptyTexture, irradianceMap || this.rendererData.gpuEmptyCubeTexture, prefilteredEnv || this.rendererData.gpuEmptyCubeTexture);
 							pass.setBindGroup(0, this.gpuVSUniformsBindGroup);
 							pass.setBindGroup(1, fsBindGroup);
 							pass.drawIndexed(wireframe ? geoset.Faces.length * 2 : geoset.Faces.length);
@@ -7995,42 +7991,15 @@
 									usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
 								});
 								const tVetexAnim = this.getTexCoordMatrix(layer);
-								const FSUniformsValues = /* @__PURE__ */ new ArrayBuffer(80);
-								const FSUniformsViews = {
-									replaceableColor: new Float32Array(FSUniformsValues, 0, 3),
-									replaceableType: new Uint32Array(FSUniformsValues, 12, 1),
-									discardAlphaLevel: new Float32Array(FSUniformsValues, 16, 1),
-									wireframe: new Uint32Array(FSUniformsValues, 20, 1),
-									alpha: new Float32Array(FSUniformsValues, 24, 1),
-									tVertexAnim: new Float32Array(FSUniformsValues, 32, 12)
-								};
+								const FSUniformsViews = this.gpuSDFSUniformsViews;
 								FSUniformsViews.replaceableColor.set(this.rendererData.teamColor);
-								FSUniformsViews.replaceableType.set([texture.ReplaceableId || 0]);
-								FSUniformsViews.discardAlphaLevel.set([getLayerDiscardAlphaLevel(layer.FilterMode)]);
-								FSUniformsViews.alpha.set([this.rendererData.geosetAlpha[i] * this.getLayerAlpha(layer)]);
-								FSUniformsViews.tVertexAnim.set(tVetexAnim.slice(0, 3));
-								FSUniformsViews.tVertexAnim.set(tVetexAnim.slice(3, 6), 4);
-								FSUniformsViews.tVertexAnim.set(tVetexAnim.slice(6, 9), 8);
-								FSUniformsViews.wireframe.set([wireframe ? 1 : 0]);
-								this.device.queue.writeBuffer(gpuFSUniformsBuffer, 0, FSUniformsValues);
-								const fsBindGroup = this.device.createBindGroup({
-									label: `fs uniforms geoset ${i} layer ${j}`,
-									layout: this.fsBindGroupLayout,
-									entries: [
-										{
-											binding: 0,
-											resource: { buffer: gpuFSUniformsBuffer }
-										},
-										{
-											binding: 1,
-											resource: this.rendererData.gpuSamplers[textureID]
-										},
-										{
-											binding: 2,
-											resource: (this.rendererData.gpuTextures[texture.Image] || this.rendererData.gpuEmptyTexture).createView()
-										}
-									]
-								});
+								FSUniformsViews.replaceableType[0] = texture.ReplaceableId || 0;
+								FSUniformsViews.discardAlphaLevel[0] = getLayerDiscardAlphaLevel(layer.FilterMode);
+								FSUniformsViews.alpha[0] = this.rendererData.geosetAlpha[i] * this.getLayerAlpha(layer);
+								writePaddedMat3(FSUniformsViews.tVertexAnim, tVetexAnim);
+								FSUniformsViews.wireframe[0] = wireframe ? 1 : 0;
+								this.device.queue.writeBuffer(gpuFSUniformsBuffer, 0, this.gpuSDFSUniformsValues);
+								const fsBindGroup = this.getGPUSDBindGroup(i, j, gpuFSUniformsBuffer, textureID, texture);
 								pass.setBindGroup(0, this.gpuVSUniformsBindGroup);
 								pass.setBindGroup(1, fsBindGroup);
 								pass.drawIndexed(wireframe ? geoset.Faces.length * 2 : geoset.Faces.length);
@@ -8165,30 +8134,149 @@
 				for (let j = 0; j < MAX_NODES; ++j) if (this.rendererData.nodes[j]) this.gl.uniformMatrix4fv(this.shaderProgramLocations.nodesMatricesAttributes[j], false, this.rendererData.nodes[j].matrix);
 			}
 		}
+		getGPUSDBindGroup(geosetIndex, layerIndex, uniformsBuffer, textureID, texture) {
+			this.gpuSDBindGroupCache[geosetIndex] ||= [];
+			const layerCache = this.gpuSDBindGroupCache[geosetIndex];
+			const cache = layerCache[layerIndex] ||= /* @__PURE__ */ new Map();
+			const sampler = this.rendererData.gpuSamplers[textureID];
+			const gpuTexture = this.rendererData.gpuTextures[texture.Image] || this.rendererData.gpuEmptyTexture;
+			const cached = cache.get(textureID);
+			if (cached?.uniformsBuffer === uniformsBuffer && cached.texture === gpuTexture && cached.sampler === sampler) return cached.bindGroup;
+			const bindGroup = this.device.createBindGroup({
+				label: `fs uniforms geoset ${geosetIndex} layer ${layerIndex}`,
+				layout: this.fsBindGroupLayout,
+				entries: [
+					{
+						binding: 0,
+						resource: { buffer: uniformsBuffer }
+					},
+					{
+						binding: 1,
+						resource: sampler
+					},
+					{
+						binding: 2,
+						resource: gpuTexture.createView()
+					}
+				]
+			});
+			cache.set(textureID, {
+				uniformsBuffer,
+				texture: gpuTexture,
+				sampler,
+				bindGroup
+			});
+			return bindGroup;
+		}
+		getGPUHDBindGroup(geosetIndex, uniformsBuffer, diffuseSampler, diffuseTexture, normalSampler, normalTexture, ormSampler, ormTexture, shadowTexture, irradianceTexture, prefilteredTexture) {
+			const cache = this.gpuHDBindGroupCache[geosetIndex] ||= [];
+			for (const cached of cache) if (cached.uniformsBuffer === uniformsBuffer && cached.diffuseTexture === diffuseTexture && cached.diffuseSampler === diffuseSampler && cached.normalTexture === normalTexture && cached.normalSampler === normalSampler && cached.ormTexture === ormTexture && cached.ormSampler === ormSampler && cached.shadowTexture === shadowTexture && cached.irradianceTexture === irradianceTexture && cached.prefilteredTexture === prefilteredTexture) return cached.bindGroup;
+			const bindGroup = this.device.createBindGroup({
+				label: `fs uniforms geoset ${geosetIndex}`,
+				layout: this.fsBindGroupLayout,
+				entries: [
+					{
+						binding: 0,
+						resource: { buffer: uniformsBuffer }
+					},
+					{
+						binding: 1,
+						resource: diffuseSampler
+					},
+					{
+						binding: 2,
+						resource: diffuseTexture.createView()
+					},
+					{
+						binding: 3,
+						resource: normalSampler
+					},
+					{
+						binding: 4,
+						resource: normalTexture.createView()
+					},
+					{
+						binding: 5,
+						resource: ormSampler
+					},
+					{
+						binding: 6,
+						resource: ormTexture.createView()
+					},
+					{
+						binding: 7,
+						resource: this.rendererData.gpuDepthSampler
+					},
+					{
+						binding: 8,
+						resource: shadowTexture.createView()
+					},
+					{
+						binding: 9,
+						resource: this.prefilterEnvSampler
+					},
+					{
+						binding: 10,
+						resource: irradianceTexture.createView({ dimension: "cube" })
+					},
+					{
+						binding: 11,
+						resource: this.prefilterEnvSampler
+					},
+					{
+						binding: 12,
+						resource: prefilteredTexture.createView({ dimension: "cube" })
+					},
+					{
+						binding: 13,
+						resource: this.gpuBrdfSampler
+					},
+					{
+						binding: 14,
+						resource: this.gpuBrdfLUT.createView()
+					}
+				]
+			});
+			cache.push({
+				uniformsBuffer,
+				diffuseTexture,
+				diffuseSampler,
+				normalTexture,
+				normalSampler,
+				ormTexture,
+				ormSampler,
+				shadowTexture,
+				irradianceTexture,
+				prefilteredTexture,
+				bindGroup
+			});
+			return bindGroup;
+		}
 		renderEnvironmentGPU(pass, mvMatrix, pMatrix) {
 			pass.setPipeline(this.envPiepeline);
-			const VSUniformsValues = /* @__PURE__ */ new ArrayBuffer(128);
-			const VSUniformsViews = {
-				mvMatrix: new Float32Array(VSUniformsValues, 0, 16),
-				pMatrix: new Float32Array(VSUniformsValues, 64, 16)
-			};
+			const VSUniformsViews = this.envVSUniformsViews;
 			VSUniformsViews.mvMatrix.set(mvMatrix);
 			VSUniformsViews.pMatrix.set(pMatrix);
-			this.device.queue.writeBuffer(this.envVSUniformsBuffer, 0, VSUniformsValues);
+			this.device.queue.writeBuffer(this.envVSUniformsBuffer, 0, this.envVSUniformsValues);
 			pass.setBindGroup(0, this.envVSBindGroup);
 			for (const path in this.rendererData.gpuEnvTextures) {
-				const fsUniformsBindGroup = this.device.createBindGroup({
-					label: `env fs uniforms ${path}`,
-					layout: this.envFSBindGroupLayout,
-					entries: [{
-						binding: 0,
-						resource: this.envSampler
-					}, {
-						binding: 1,
-						resource: this.rendererData.gpuEnvTextures[path].createView({ dimension: "cube" })
-					}]
-				});
-				pass.setBindGroup(1, fsUniformsBindGroup);
+				const texture = this.rendererData.gpuEnvTextures[path];
+				let cached = this.envFSBindGroupCache[path];
+				if (!cached || cached.texture !== texture) cached = this.envFSBindGroupCache[path] = {
+					texture,
+					bindGroup: this.device.createBindGroup({
+						label: `env fs uniforms ${path}`,
+						layout: this.envFSBindGroupLayout,
+						entries: [{
+							binding: 0,
+							resource: this.envSampler
+						}, {
+							binding: 1,
+							resource: texture.createView({ dimension: "cube" })
+						}]
+					})
+				};
+				pass.setBindGroup(1, cached.bindGroup);
 				pass.setPipeline(this.envPiepeline);
 				pass.setVertexBuffer(0, this.cubeGPUVertexBuffer);
 				pass.draw(36);

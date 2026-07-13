@@ -379,6 +379,9 @@ export declare class ModelRenderer {
     private envFSBindGroupLayout;
     private envVSUniformsBuffer;
     private envVSBindGroup;
+    private envFSBindGroupCache;
+    private envVSUniformsValues;
+    private envVSUniformsViews;
     private envSampler;
     private cubeVertexBuffer;
     private cubeGPUVertexBuffer;
@@ -418,6 +421,14 @@ export declare class ModelRenderer {
     private gpuVSUniformsBuffer;
     private gpuVSUniformsBindGroup;
     private gpuFSUniformsBuffers;
+    private gpuSDBindGroupCache;
+    private gpuHDBindGroupCache;
+    private gpuVSUniformsValues;
+    private gpuVSUniformsViews;
+    private gpuSDFSUniformsValues;
+    private gpuSDFSUniformsViews;
+    private gpuHDFSUniformsValues;
+    private gpuHDFSUniformsViews;
     constructor(model: Model);
     destroy(): void;
     private initRequiredEnvMaps;
@@ -449,6 +460,8 @@ export declare class ModelRenderer {
         depthTextureTarget?: GPUTexture;
     }): void;
     private bindWebGLModelState;
+    private getGPUSDBindGroup;
+    private getGPUHDBindGroup;
     private renderEnvironmentGPU;
     private renderEnvironment;
     /**

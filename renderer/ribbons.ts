@@ -11,6 +11,9 @@ import fragmentShader from './shaders/webgl/ribbon.fs.glsl?raw';
 import ribbonShader from './shaders/webgpu/ribbons.wgsl?raw';
 import {comparePriorityPlane, getLayerDiscardAlphaLevel} from './renderSemantics';
 
+const firstVertex = vec3.create();
+const secondVertex = vec3.create();
+
 interface RibbonEmitterWrapper {
     index: number;
 
@@ -30,6 +33,10 @@ interface RibbonEmitterWrapper {
     texCoordGPUBuffer: GPUBuffer;
 
     fsUnifrmsPerLayer: GPUBuffer[];
+    fsBindGroupsPerLayer: GPUBindGroup[];
+    fsBoundBuffersPerLayer: GPUBuffer[];
+    fsTexturesPerLayer: GPUTexture[];
+    fsSamplersPerLayer: GPUSampler[];
 }
 
 export class RibbonsController {
@@ -46,6 +53,19 @@ export class RibbonsController {
     private fsBindGroupLayout: GPUBindGroupLayout | null;
     private gpuVSUniformsBuffer: GPUBuffer;
     private gpuVSUniformsBindGroup: GPUBindGroup;
+    private gpuVSUniformsValues = new ArrayBuffer(128);
+    private gpuVSUniformsViews = {
+        mvMatrix: new Float32Array(this.gpuVSUniformsValues, 0, 16),
+        pMatrix: new Float32Array(this.gpuVSUniformsValues, 64, 16)
+    };
+    private gpuVSMatricesInitialized = false;
+    private gpuFSUniformsValues = new ArrayBuffer(48);
+    private gpuFSUniformsViews = {
+        replaceableColor: new Float32Array(this.gpuFSUniformsValues, 0, 3),
+        replaceableType: new Uint32Array(this.gpuFSUniformsValues, 12, 1),
+        discardAlphaLevel: new Float32Array(this.gpuFSUniformsValues, 16, 1),
+        color: new Float32Array(this.gpuFSUniformsValues, 32, 4),
+    };
 
     private shaderProgramLocations: {
         vertexPositionAttribute: number,
@@ -62,6 +82,7 @@ export class RibbonsController {
     private interp: ModelInterp;
     private rendererData: RendererData;
     private emitters: RibbonEmitterWrapper[];
+    private emittersByIndex: RibbonEmitterWrapper[];
 
     constructor (interp: ModelInterp, rendererData: RendererData) {
         this.shaderProgramLocations = {
@@ -79,6 +100,7 @@ export class RibbonsController {
         this.interp = interp;
         this.rendererData = rendererData;
         this.emitters = [];
+        this.emittersByIndex = [];
 
         if (rendererData.model.RibbonEmitters.length) {
             for (let i = 0; i < rendererData.model.RibbonEmitters.length; ++i) {
@@ -98,7 +120,11 @@ export class RibbonsController {
                     texCoords: null,
                     texCoordBuffer: null,
                     texCoordGPUBuffer: null,
-                    fsUnifrmsPerLayer: []
+                    fsUnifrmsPerLayer: [],
+                    fsBindGroupsPerLayer: [],
+                    fsBoundBuffersPerLayer: [],
+                    fsTexturesPerLayer: [],
+                    fsSamplersPerLayer: []
                 };
 
                 emitter.baseCapacity = Math.ceil(
@@ -106,6 +132,7 @@ export class RibbonsController {
                 ) + 1; // extra points
 
                 this.emitters.push(emitter);
+                this.emittersByIndex[i] = emitter;
             }
             this.emitters.sort((left, right) => {
                 const leftPriority = rendererData.model.Materials[left.props.MaterialID]?.PriorityPlane ?? 0;
@@ -150,6 +177,7 @@ export class RibbonsController {
             }
         }
         this.emitters = [];
+        this.emittersByIndex = [];
     }
 
     public initGL (glContext: WebGLRenderingContext): void {
@@ -160,6 +188,7 @@ export class RibbonsController {
 
     public initGPUDevice (device: GPUDevice): void {
         this.device = device;
+        this.gpuVSMatricesInitialized = false;
 
         this.gpuShaderModule = device.createShaderModule({
             label: 'ribbons shader module',
@@ -399,8 +428,12 @@ export class RibbonsController {
         this.gl.enableVertexAttribArray(this.shaderProgramLocations.vertexPositionAttribute);
         this.gl.enableVertexAttribArray(this.shaderProgramLocations.textureCoordAttribute);
 
-        for (const emitter of this.emitters) {
-            if (emitterIndices && !emitterIndices.includes(emitter.index)) {
+        const emitterCount = emitterIndices?.length ?? this.emitters.length;
+        for (let emitterIndex = 0; emitterIndex < emitterCount; ++emitterIndex) {
+            const emitter = emitterIndices ?
+                this.emittersByIndex[emitterIndices[emitterIndex]] :
+                this.emitters[emitterIndex];
+            if (!emitter) {
                 continue;
             }
             if (emitter.creationTimes.length < 2) {
@@ -432,25 +465,45 @@ export class RibbonsController {
         pMatrix: mat4,
         emitterIndices?: readonly number[]
     ): void {
-        const VSUniformsValues = new ArrayBuffer(128);
-        const VSUniformsViews = {
-            mvMatrix: new Float32Array(VSUniformsValues, 0, 16),
-            pMatrix: new Float32Array(VSUniformsValues, 64, 16)
-        };
-        VSUniformsViews.mvMatrix.set(mvMatrix);
-        VSUniformsViews.pMatrix.set(pMatrix);
-        this.device.queue.writeBuffer(this.gpuVSUniformsBuffer, 0, VSUniformsValues);
+        const VSUniformsViews = this.gpuVSUniformsViews;
+        let matricesChanged = !this.gpuVSMatricesInitialized;
+        for (let i = 0; i < 16 && !matricesChanged; ++i) {
+            matricesChanged = VSUniformsViews.mvMatrix[i] !== mvMatrix[i] ||
+                VSUniformsViews.pMatrix[i] !== pMatrix[i];
+        }
+        if (matricesChanged) {
+            VSUniformsViews.mvMatrix.set(mvMatrix);
+            VSUniformsViews.pMatrix.set(pMatrix);
+            this.device.queue.writeBuffer(this.gpuVSUniformsBuffer, 0, this.gpuVSUniformsValues);
+            this.gpuVSMatricesInitialized = true;
+        }
 
-        for (const emitter of this.emitters) {
-            if (emitterIndices && !emitterIndices.includes(emitter.index)) {
+        const emitterCount = emitterIndices?.length ?? this.emitters.length;
+        for (let emitterIndex = 0; emitterIndex < emitterCount; ++emitterIndex) {
+            const emitter = emitterIndices ?
+                this.emittersByIndex[emitterIndices[emitterIndex]] :
+                this.emitters[emitterIndex];
+            if (!emitter) {
                 continue;
             }
             if (emitter.creationTimes.length < 2) {
                 continue;
             }
 
-            this.device.queue.writeBuffer(emitter.vertexGPUBuffer, 0, emitter.vertices);
-            this.device.queue.writeBuffer(emitter.texCoordGPUBuffer, 0, emitter.texCoords);
+            this.device.queue.writeBuffer(
+                emitter.vertexGPUBuffer,
+                0,
+                emitter.vertices,
+                0,
+                emitter.creationTimes.length * 6
+            );
+            this.device.queue.writeBuffer(
+                emitter.texCoordGPUBuffer,
+                0,
+                emitter.texCoords,
+                0,
+                emitter.creationTimes.length * 4
+            );
 
             pass.setVertexBuffer(0, emitter.vertexGPUBuffer);
             pass.setVertexBuffer(1, emitter.texCoordGPUBuffer);
@@ -468,23 +521,15 @@ export class RibbonsController {
                 const pipeline = this.gpuPipelines[layer.FilterMode] || this.gpuPipelines[0];
                 pass.setPipeline(pipeline);
 
-                const fsUniformsValues = new ArrayBuffer(48);
-                const fsUniformsViews = {
-                    replaceableColor: new Float32Array(fsUniformsValues, 0, 3),
-                    replaceableType: new Uint32Array(fsUniformsValues, 12, 1),
-                    discardAlphaLevel: new Float32Array(fsUniformsValues, 16, 1),
-                    color: new Float32Array(fsUniformsValues, 32, 4),
-                };
+                const fsUniformsViews = this.gpuFSUniformsViews;
 
                 fsUniformsViews.replaceableColor.set(this.rendererData.teamColor);
-                fsUniformsViews.replaceableType.set([texture.ReplaceableId || 0]);
-                fsUniformsViews.discardAlphaLevel.set([getLayerDiscardAlphaLevel(layer.FilterMode)]);
-                fsUniformsViews.color.set([
-                    emitter.props.Color[0],
-                    emitter.props.Color[1],
-                    emitter.props.Color[2],
-                    this.interp.animVectorVal(emitter.props.Alpha, 1)
-                ]);
+                fsUniformsViews.replaceableType[0] = texture.ReplaceableId || 0;
+                fsUniformsViews.discardAlphaLevel[0] = getLayerDiscardAlphaLevel(layer.FilterMode);
+                fsUniformsViews.color[0] = emitter.props.Color[0];
+                fsUniformsViews.color[1] = emitter.props.Color[1];
+                fsUniformsViews.color[2] = emitter.props.Color[2];
+                fsUniformsViews.color[3] = this.interp.animVectorVal(emitter.props.Alpha, 1);
 
                 if (!emitter.fsUnifrmsPerLayer[j]) {
                     emitter.fsUnifrmsPerLayer[j] = this.device.createBuffer({
@@ -495,28 +540,31 @@ export class RibbonsController {
                 }
                 const fsUniformsBuffer = emitter.fsUnifrmsPerLayer[j];
 
-                this.device.queue.writeBuffer(fsUniformsBuffer, 0, fsUniformsValues);
+                this.device.queue.writeBuffer(fsUniformsBuffer, 0, this.gpuFSUniformsValues);
 
-                const fsUniformsBindGroup = this.device.createBindGroup({
-                    label: `ribbons fs uniforms ${emitter.index}`,
-                    layout: this.fsBindGroupLayout,
-                    entries: [
-                        {
-                            binding: 0,
-                            resource: { buffer: fsUniformsBuffer }
-                        },
-                        {
-                            binding: 1,
-                            resource: this.rendererData.gpuSamplers[textureID]
-                        },
-                        {
-                            binding: 2,
-                            resource: (this.rendererData.gpuTextures[texture.Image] || this.rendererData.gpuEmptyTexture).createView()
-                        }
-                    ]
-                });
+                const sampler = this.rendererData.gpuSamplers[textureID];
+                const gpuTexture = this.rendererData.gpuTextures[texture.Image] || this.rendererData.gpuEmptyTexture;
+                if (
+                    !emitter.fsBindGroupsPerLayer[j] ||
+                    emitter.fsBoundBuffersPerLayer[j] !== fsUniformsBuffer ||
+                    emitter.fsTexturesPerLayer[j] !== gpuTexture ||
+                    emitter.fsSamplersPerLayer[j] !== sampler
+                ) {
+                    emitter.fsBindGroupsPerLayer[j] = this.device.createBindGroup({
+                        label: `ribbons fs uniforms ${emitter.index} layer ${j}`,
+                        layout: this.fsBindGroupLayout,
+                        entries: [
+                            {binding: 0, resource: {buffer: fsUniformsBuffer}},
+                            {binding: 1, resource: sampler},
+                            {binding: 2, resource: gpuTexture.createView()}
+                        ]
+                    });
+                    emitter.fsBoundBuffersPerLayer[j] = fsUniformsBuffer;
+                    emitter.fsTexturesPerLayer[j] = gpuTexture;
+                    emitter.fsSamplersPerLayer[j] = sampler;
+                }
 
-                pass.setBindGroup(1, fsUniformsBindGroup);
+                pass.setBindGroup(1, emitter.fsBindGroupsPerLayer[j]);
 
                 pass.draw(emitter.creationTimes.length * 2);
             }
@@ -561,7 +609,7 @@ export class RibbonsController {
             return;
         }
 
-        size = Math.min(size, emitter.baseCapacity);
+        size = Math.max(size, emitter.baseCapacity);
 
         const vertices = new Float32Array(size * 2 * 3);  // 2 vertices * xyz
         const texCoords = new Float32Array(size * 2 * 2); // 2 vertices * xy
@@ -621,16 +669,20 @@ export class RibbonsController {
         }
 
         if (emitter.creationTimes.length) {
-            while (emitter.creationTimes[0] + emitter.props.LifeSpan * 1000 < now) {
-                emitter.creationTimes.shift();
-                for (let i = 0; i + 6 + 5 < emitter.vertices.length; i += 6) {
-                    emitter.vertices[i]     = emitter.vertices[i + 6];
-                    emitter.vertices[i + 1] = emitter.vertices[i + 7];
-                    emitter.vertices[i + 2] = emitter.vertices[i + 8];
-                    emitter.vertices[i + 3] = emitter.vertices[i + 9];
-                    emitter.vertices[i + 4] = emitter.vertices[i + 10];
-                    emitter.vertices[i + 5] = emitter.vertices[i + 11];
+            let expiredCount = 0;
+            while (
+                expiredCount < emitter.creationTimes.length &&
+                emitter.creationTimes[expiredCount] + emitter.props.LifeSpan * 1000 < now
+            ) {
+                ++expiredCount;
+            }
+            if (expiredCount) {
+                const remainingCount = emitter.creationTimes.length - expiredCount;
+                for (let i = 0; i < remainingCount; ++i) {
+                    emitter.creationTimes[i] = emitter.creationTimes[i + expiredCount];
                 }
+                emitter.creationTimes.length = remainingCount;
+                emitter.vertices.copyWithin(0, expiredCount * 6, (expiredCount + remainingCount) * 6);
             }
         }
 
@@ -641,8 +693,8 @@ export class RibbonsController {
     }
 
     private appendVertices (emitter: RibbonEmitterWrapper): void {
-        const first: vec3 = vec3.clone(emitter.props.PivotPoint as vec3);
-        const second: vec3 = vec3.clone(emitter.props.PivotPoint as vec3);
+        const first = vec3.copy(firstVertex, emitter.props.PivotPoint as vec3);
+        const second = vec3.copy(secondVertex, emitter.props.PivotPoint as vec3);
 
         first[1] -= this.interp.animVectorVal(emitter.props.HeightBelow, 0);
         second[1] += this.interp.animVectorVal(emitter.props.HeightAbove, 0);
@@ -661,14 +713,13 @@ export class RibbonsController {
     }
 
     private updateEmitterTexCoords (emitter: RibbonEmitterWrapper, now: number): void {
+        const textureSlot = this.interp.animVectorVal(emitter.props.TextureSlot, 0);
+        const texCoordX = textureSlot % emitter.props.Columns;
+        const texCoordY = Math.floor(textureSlot / emitter.props.Rows);
+        const cellWidth = 1 / emitter.props.Columns;
+        const cellHeight = 1 / emitter.props.Rows;
         for (let i = 0; i < emitter.creationTimes.length; ++i) {
             let relativePos = (now - emitter.creationTimes[i]) / (emitter.props.LifeSpan * 1000);
-            const textureSlot = this.interp.animVectorVal(emitter.props.TextureSlot, 0);
-
-            const texCoordX = textureSlot % emitter.props.Columns;
-            const texCoordY = Math.floor(textureSlot / emitter.props.Rows);
-            const cellWidth = 1 / emitter.props.Columns;
-            const cellHeight = 1 / emitter.props.Rows;
 
             relativePos = texCoordX * cellWidth + relativePos * cellWidth;
 

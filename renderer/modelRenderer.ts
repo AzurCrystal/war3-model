@@ -74,6 +74,32 @@ interface WebGLProgramObject<A extends string, U extends string> {
     uniforms: Record<U, WebGLUniformLocation>;
 }
 
+interface GPUSDBindGroupCacheEntry {
+    uniformsBuffer: GPUBuffer;
+    texture: GPUTexture;
+    sampler: GPUSampler;
+    bindGroup: GPUBindGroup;
+}
+
+interface GPUHDBindGroupCacheEntry {
+    uniformsBuffer: GPUBuffer;
+    diffuseTexture: GPUTexture;
+    diffuseSampler: GPUSampler;
+    normalTexture: GPUTexture;
+    normalSampler: GPUSampler;
+    ormTexture: GPUTexture;
+    ormSampler: GPUSampler;
+    shadowTexture: GPUTexture;
+    irradianceTexture: GPUTexture;
+    prefilteredTexture: GPUTexture;
+    bindGroup: GPUBindGroup;
+}
+
+interface GPUEnvironmentBindGroupCacheEntry {
+    texture: GPUTexture;
+    bindGroup: GPUBindGroup;
+}
+
 const vertexShaderHardwareSkinning = /*#__PURE__*/ vertexShaderHardwareSkinningSource.replace(/\$\{MAX_NODES}/g, String(MAX_NODES));
 const vertexShaderHDHardwareSkinningOld = /*#__PURE__*/ vertexShaderHDHardwareSkinningOldSource.replace(/\$\{MAX_NODES}/g, String(MAX_NODES));
 const vertexShaderHDHardwareSkinningNew = /*#__PURE__*/ vertexShaderHDHardwareSkinningNewSource.replace(/\$\{MAX_NODES}/g, String(MAX_NODES));
@@ -109,6 +135,18 @@ const tempVec3: vec3 = vec3.create();
 const identifyMat3: mat3 = mat3.create();
 const texCoordMat4: mat4 = mat4.create();
 const texCoordMat3: mat3 = mat3.create();
+
+function writePaddedMat3(out: Float32Array, value: mat3): void {
+    out[0] = value[0];
+    out[1] = value[1];
+    out[2] = value[2];
+    out[4] = value[3];
+    out[5] = value[4];
+    out[6] = value[5];
+    out[8] = value[6];
+    out[9] = value[7];
+    out[10] = value[8];
+}
 
 const GPU_LAYER_PROPS: [string, GPUBlendState, GPUDepthStencilState][] = [['none', {
     color: {
@@ -314,6 +352,12 @@ export class ModelRenderer {
     private envFSBindGroupLayout: GPUBindGroupLayout | null;
     private envVSUniformsBuffer: GPUBuffer;
     private envVSBindGroup: GPUBindGroup;
+    private envFSBindGroupCache: Record<string, GPUEnvironmentBindGroupCacheEntry> = {};
+    private envVSUniformsValues = new ArrayBuffer(128);
+    private envVSUniformsViews = {
+        mvMatrix: new Float32Array(this.envVSUniformsValues, 0, 16),
+        pMatrix: new Float32Array(this.envVSUniformsValues, 64, 16)
+    };
     private envSampler: GPUSampler;
     private cubeVertexBuffer: WebGLBuffer;
     private cubeGPUVertexBuffer: GPUBuffer;
@@ -355,6 +399,37 @@ export class ModelRenderer {
     private gpuVSUniformsBuffer: GPUBuffer;
     private gpuVSUniformsBindGroup: GPUBindGroup;
     private gpuFSUniformsBuffers: GPUBuffer[][] = [];
+    private gpuSDBindGroupCache: Map<number, GPUSDBindGroupCacheEntry>[][] = [];
+    private gpuHDBindGroupCache: GPUHDBindGroupCacheEntry[][] = [];
+
+    private gpuVSUniformsValues = new ArrayBuffer(128 + 64 * MAX_NODES);
+    private gpuVSUniformsViews = {
+        mvMatrix: new Float32Array(this.gpuVSUniformsValues, 0, 16),
+        pMatrix: new Float32Array(this.gpuVSUniformsValues, 64, 16),
+        nodesMatrices: new Float32Array(this.gpuVSUniformsValues, 128, 16 * MAX_NODES),
+    };
+    private gpuSDFSUniformsValues = new ArrayBuffer(80);
+    private gpuSDFSUniformsViews = {
+        replaceableColor: new Float32Array(this.gpuSDFSUniformsValues, 0, 3),
+        replaceableType: new Uint32Array(this.gpuSDFSUniformsValues, 12, 1),
+        discardAlphaLevel: new Float32Array(this.gpuSDFSUniformsValues, 16, 1),
+        wireframe: new Uint32Array(this.gpuSDFSUniformsValues, 20, 1),
+        alpha: new Float32Array(this.gpuSDFSUniformsValues, 24, 1),
+        tVertexAnim: new Float32Array(this.gpuSDFSUniformsValues, 32, 12),
+    };
+    private gpuHDFSUniformsValues = new ArrayBuffer(192);
+    private gpuHDFSUniformsViews = {
+        replaceableColor: new Float32Array(this.gpuHDFSUniformsValues, 0, 3),
+        discardAlphaLevel: new Float32Array(this.gpuHDFSUniformsValues, 12, 1),
+        tVertexAnim: new Float32Array(this.gpuHDFSUniformsValues, 16, 12),
+        lightPos: new Float32Array(this.gpuHDFSUniformsValues, 64, 3),
+        hasEnv: new Uint32Array(this.gpuHDFSUniformsValues, 76, 1),
+        lightColor: new Float32Array(this.gpuHDFSUniformsValues, 80, 3),
+        wireframe: new Uint32Array(this.gpuHDFSUniformsValues, 92, 1),
+        cameraPos: new Float32Array(this.gpuHDFSUniformsValues, 96, 3),
+        shadowParams: new Float32Array(this.gpuHDFSUniformsValues, 112, 3),
+        shadowMapLightMatrix: new Float32Array(this.gpuHDFSUniformsValues, 128, 16),
+    };
 
     constructor(model: Model) {
         this.isHD = model.Geosets?.some(it => it.SkinWeights?.length > 0);
@@ -684,6 +759,9 @@ export class ModelRenderer {
         this.canvas = canvas;
         this.device = device;
         this.gpuContext = context;
+        this.gpuSDBindGroupCache = [];
+        this.gpuHDBindGroupCache = [];
+        this.envFSBindGroupCache = {};
 
         this.initRequiredEnvMaps();
 
@@ -880,6 +958,15 @@ export class ModelRenderer {
     }
 
     public setFrame (frame: number): void {
+        if (
+            this.rendererData.animationInfo &&
+            this.rendererData.animationInfo.Interval[0] <= frame &&
+            this.rendererData.animationInfo.Interval[1] >= frame
+        ) {
+            this.rendererData.frame = frame;
+            return;
+        }
+
         const index = this.model.Sequences.findIndex(it => it.Interval[0] <= frame && it.Interval[1] >= frame);
 
         if (index < 0) {
@@ -1016,12 +1103,7 @@ export class ModelRenderer {
                 this.renderEnvironmentGPU(pass, mvMatrix, pMatrix);
             }
 
-            const VSUniformsValues = new ArrayBuffer(128 + 64 * MAX_NODES);
-            const VSUniformsViews = {
-                mvMatrix: new Float32Array(VSUniformsValues, 0, 16),
-                pMatrix: new Float32Array(VSUniformsValues, 64, 16),
-                nodesMatrices: new Float32Array(VSUniformsValues, 128, 16 * MAX_NODES),
-            };
+            const VSUniformsViews = this.gpuVSUniformsViews;
             VSUniformsViews.mvMatrix.set(mvMatrix);
             VSUniformsViews.pMatrix.set(pMatrix);
             for (let j = 0; j < MAX_NODES; ++j) {
@@ -1029,7 +1111,7 @@ export class ModelRenderer {
                     VSUniformsViews.nodesMatrices.set(this.rendererData.nodes[j].matrix, j * 16);
                 }
             }
-            this.device.queue.writeBuffer(this.gpuVSUniformsBuffer, 0, VSUniformsValues);
+            this.device.queue.writeBuffer(this.gpuVSUniformsBuffer, 0, this.gpuVSUniformsValues);
 
             for (const group of this.renderGroups) {
                 if (group.kind === 'particle') {
@@ -1119,109 +1201,39 @@ export class ModelRenderer {
 
                     const tVetexAnim = this.getTexCoordMatrix(baseLayer);
 
-                    const FSUniformsValues = new ArrayBuffer(192);
-                    const FSUniformsViews = {
-                        replaceableColor: new Float32Array(FSUniformsValues, 0, 3),
-                        discardAlphaLevel: new Float32Array(FSUniformsValues, 12, 1),
-                        tVertexAnim: new Float32Array(FSUniformsValues, 16, 12),
-                        lightPos: new Float32Array(FSUniformsValues, 64, 3),
-                        hasEnv: new Uint32Array(FSUniformsValues, 76, 1),
-                        lightColor: new Float32Array(FSUniformsValues, 80, 3),
-                        wireframe: new Uint32Array(FSUniformsValues, 92, 1),
-                        cameraPos: new Float32Array(FSUniformsValues, 96, 3),
-                        shadowParams: new Float32Array(FSUniformsValues, 112, 3),
-                        shadowMapLightMatrix: new Float32Array(FSUniformsValues, 128, 16),
-                    };
+                    const FSUniformsViews = this.gpuHDFSUniformsViews;
                     FSUniformsViews.replaceableColor.set(this.rendererData.teamColor);
-                    // FSUniformsViews.replaceableType.set([texture.ReplaceableId || 0]);
-                    FSUniformsViews.discardAlphaLevel.set([getLayerDiscardAlphaLevel(baseLayer.FilterMode)]);
-                    FSUniformsViews.tVertexAnim.set(tVetexAnim.slice(0, 3));
-                    FSUniformsViews.tVertexAnim.set(tVetexAnim.slice(3, 6), 4);
-                    FSUniformsViews.tVertexAnim.set(tVetexAnim.slice(6, 9), 8);
+                    FSUniformsViews.discardAlphaLevel[0] = getLayerDiscardAlphaLevel(baseLayer.FilterMode);
+                    writePaddedMat3(FSUniformsViews.tVertexAnim, tVetexAnim);
                     FSUniformsViews.lightPos.set(this.rendererData.lightPos);
                     FSUniformsViews.lightColor.set(this.rendererData.lightColor);
                     FSUniformsViews.cameraPos.set(this.rendererData.cameraPos);
                     if (shadowMapTexture && shadowMapMatrix) {
-                        FSUniformsViews.shadowParams.set([1, shadowBias ?? 1e-6, shadowSmoothingStep ?? 1 / 1024]);
+                        FSUniformsViews.shadowParams[0] = 1;
+                        FSUniformsViews.shadowParams[1] = shadowBias ?? 1e-6;
+                        FSUniformsViews.shadowParams[2] = shadowSmoothingStep ?? 1 / 1024;
                         FSUniformsViews.shadowMapLightMatrix.set(shadowMapMatrix);
                     } else {
-                        FSUniformsViews.shadowParams.set([0, 0, 0]);
-                        FSUniformsViews.shadowMapLightMatrix.set([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+                        FSUniformsViews.shadowParams.fill(0);
+                        FSUniformsViews.shadowMapLightMatrix.fill(0);
                     }
-                    FSUniformsViews.hasEnv.set([hasEnv ? 1 : 0]);
-                    FSUniformsViews.wireframe.set([wireframe ? 1 : 0]);
-                    this.device.queue.writeBuffer(gpuFSUniformsBuffer, 0, FSUniformsValues);
+                    FSUniformsViews.hasEnv[0] = hasEnv ? 1 : 0;
+                    FSUniformsViews.wireframe[0] = wireframe ? 1 : 0;
+                    this.device.queue.writeBuffer(gpuFSUniformsBuffer, 0, this.gpuHDFSUniformsValues);
 
-                    const fsBindGroup = this.device.createBindGroup({
-                        label: `fs uniforms geoset ${i}`,
-                        layout: this.fsBindGroupLayout,
-                        entries: [
-                            {
-                                binding: 0,
-                                resource: { buffer: gpuFSUniformsBuffer }
-                            },
-                            {
-                                binding: 1,
-                                resource: this.rendererData.gpuSamplers[diffuseTextureID]
-                            },
-                            {
-                                binding: 2,
-                                resource: (this.rendererData.gpuTextures[diffuseTexture.Image] || this.rendererData.gpuEmptyTexture).createView()
-                            },
-                            {
-                                binding: 3,
-                                resource: this.rendererData.gpuSamplers[normalTextureID]
-                            },
-                            {
-                                binding: 4,
-                                resource: (this.rendererData.gpuTextures[normalTexture.Image] || this.rendererData.gpuEmptyTexture).createView()
-                            },
-                            {
-                                binding: 5,
-                                resource: this.rendererData.gpuSamplers[ormTextureID]
-                            },
-                            {
-                                binding: 6,
-                                resource: (this.rendererData.gpuTextures[ormTexture.Image] || this.rendererData.gpuEmptyTexture).createView()
-                            },
-                            {
-                                binding: 7,
-                                resource: this.rendererData.gpuDepthSampler
-                            },
-                            {
-                                binding: 8,
-                                resource: (shadowMapTexture as GPUTexture || this.rendererData.gpuDepthEmptyTexture).createView()
-                            },
-                            {
-                                binding: 9,
-                                resource: this.prefilterEnvSampler
-                            },
-                            {
-                                binding: 10,
-                                resource: (irradianceMap as GPUTexture || this.rendererData.gpuEmptyCubeTexture).createView({
-                                    dimension: 'cube'
-                                })
-                            },
-                            {
-                                binding: 11,
-                                resource: this.prefilterEnvSampler
-                            },
-                            {
-                                binding: 12,
-                                resource: (prefilteredEnv as GPUTexture || this.rendererData.gpuEmptyCubeTexture).createView({
-                                    dimension: 'cube'
-                                })
-                            },
-                            {
-                                binding: 13,
-                                resource: this.gpuBrdfSampler
-                            },
-                            {
-                                binding: 14,
-                                resource: this.gpuBrdfLUT.createView()
-                            }
-                        ]
-                    });
+                    const fsBindGroup = this.getGPUHDBindGroup(
+                        i,
+                        gpuFSUniformsBuffer,
+                        this.rendererData.gpuSamplers[diffuseTextureID],
+                        this.rendererData.gpuTextures[diffuseTexture.Image] || this.rendererData.gpuEmptyTexture,
+                        this.rendererData.gpuSamplers[normalTextureID],
+                        this.rendererData.gpuTextures[normalTexture.Image] || this.rendererData.gpuEmptyTexture,
+                        this.rendererData.gpuSamplers[ormTextureID],
+                        this.rendererData.gpuTextures[ormTexture.Image] || this.rendererData.gpuEmptyTexture,
+                        shadowMapTexture as GPUTexture || this.rendererData.gpuDepthEmptyTexture,
+                        irradianceMap as GPUTexture || this.rendererData.gpuEmptyCubeTexture,
+                        prefilteredEnv as GPUTexture || this.rendererData.gpuEmptyCubeTexture
+                    );
 
                     pass.setBindGroup(0, this.gpuVSUniformsBindGroup);
                     pass.setBindGroup(1, fsBindGroup);
@@ -1252,45 +1264,16 @@ export class ModelRenderer {
 
                         const tVetexAnim = this.getTexCoordMatrix(layer);
 
-                        const FSUniformsValues = new ArrayBuffer(80);
-                        const FSUniformsViews = {
-                            replaceableColor: new Float32Array(FSUniformsValues, 0, 3),
-                            replaceableType: new Uint32Array(FSUniformsValues, 12, 1),
-                            discardAlphaLevel: new Float32Array(FSUniformsValues, 16, 1),
-                            wireframe: new Uint32Array(FSUniformsValues, 20, 1),
-                            alpha: new Float32Array(FSUniformsValues, 24, 1),
-                            tVertexAnim: new Float32Array(FSUniformsValues, 32, 12),
-                        };
+                        const FSUniformsViews = this.gpuSDFSUniformsViews;
                         FSUniformsViews.replaceableColor.set(this.rendererData.teamColor);
-                        FSUniformsViews.replaceableType.set([texture.ReplaceableId || 0]);
-                        FSUniformsViews.discardAlphaLevel.set([getLayerDiscardAlphaLevel(layer.FilterMode)]);
-                        FSUniformsViews.alpha.set([
-                            this.rendererData.geosetAlpha[i] * this.getLayerAlpha(layer)
-                        ]);
-                        FSUniformsViews.tVertexAnim.set(tVetexAnim.slice(0, 3));
-                        FSUniformsViews.tVertexAnim.set(tVetexAnim.slice(3, 6), 4);
-                        FSUniformsViews.tVertexAnim.set(tVetexAnim.slice(6, 9), 8);
-                        FSUniformsViews.wireframe.set([wireframe ? 1 : 0]);
-                        this.device.queue.writeBuffer(gpuFSUniformsBuffer, 0, FSUniformsValues);
+                        FSUniformsViews.replaceableType[0] = texture.ReplaceableId || 0;
+                        FSUniformsViews.discardAlphaLevel[0] = getLayerDiscardAlphaLevel(layer.FilterMode);
+                        FSUniformsViews.alpha[0] = this.rendererData.geosetAlpha[i] * this.getLayerAlpha(layer);
+                        writePaddedMat3(FSUniformsViews.tVertexAnim, tVetexAnim);
+                        FSUniformsViews.wireframe[0] = wireframe ? 1 : 0;
+                        this.device.queue.writeBuffer(gpuFSUniformsBuffer, 0, this.gpuSDFSUniformsValues);
 
-                        const fsBindGroup = this.device.createBindGroup({
-                            label: `fs uniforms geoset ${i} layer ${j}`,
-                            layout: this.fsBindGroupLayout,
-                            entries: [
-                                {
-                                    binding: 0,
-                                    resource: { buffer: gpuFSUniformsBuffer }
-                                },
-                                {
-                                    binding: 1,
-                                    resource: this.rendererData.gpuSamplers[textureID]
-                                },
-                                {
-                                    binding: 2,
-                                    resource: (this.rendererData.gpuTextures[texture.Image] || this.rendererData.gpuEmptyTexture).createView()
-                                }
-                            ]
-                        });
+                        const fsBindGroup = this.getGPUSDBindGroup(i, j, gpuFSUniformsBuffer, textureID, texture);
 
                         pass.setBindGroup(0, this.gpuVSUniformsBindGroup);
                         pass.setBindGroup(1, fsBindGroup);
@@ -1504,37 +1487,146 @@ export class ModelRenderer {
         }
     }
 
+    private getGPUSDBindGroup(
+        geosetIndex: number,
+        layerIndex: number,
+        uniformsBuffer: GPUBuffer,
+        textureID: number,
+        texture: Model['Textures'][number]
+    ): GPUBindGroup {
+        this.gpuSDBindGroupCache[geosetIndex] ||= [];
+        const layerCache = this.gpuSDBindGroupCache[geosetIndex];
+        const cache = layerCache[layerIndex] ||= new Map<number, GPUSDBindGroupCacheEntry>();
+        const sampler = this.rendererData.gpuSamplers[textureID];
+        const gpuTexture = this.rendererData.gpuTextures[texture.Image] || this.rendererData.gpuEmptyTexture;
+        const cached = cache.get(textureID);
+
+        if (
+            cached?.uniformsBuffer === uniformsBuffer &&
+            cached.texture === gpuTexture &&
+            cached.sampler === sampler
+        ) {
+            return cached.bindGroup;
+        }
+
+        const bindGroup = this.device.createBindGroup({
+            label: `fs uniforms geoset ${geosetIndex} layer ${layerIndex}`,
+            layout: this.fsBindGroupLayout,
+            entries: [
+                {
+                    binding: 0,
+                    resource: {buffer: uniformsBuffer}
+                },
+                {
+                    binding: 1,
+                    resource: sampler
+                },
+                {
+                    binding: 2,
+                    resource: gpuTexture.createView()
+                }
+            ]
+        });
+        cache.set(textureID, {uniformsBuffer, texture: gpuTexture, sampler, bindGroup});
+        return bindGroup;
+    }
+
+    private getGPUHDBindGroup(
+        geosetIndex: number,
+        uniformsBuffer: GPUBuffer,
+        diffuseSampler: GPUSampler,
+        diffuseTexture: GPUTexture,
+        normalSampler: GPUSampler,
+        normalTexture: GPUTexture,
+        ormSampler: GPUSampler,
+        ormTexture: GPUTexture,
+        shadowTexture: GPUTexture,
+        irradianceTexture: GPUTexture,
+        prefilteredTexture: GPUTexture
+    ): GPUBindGroup {
+        const cache = this.gpuHDBindGroupCache[geosetIndex] ||= [];
+        for (const cached of cache) {
+            if (
+                cached.uniformsBuffer === uniformsBuffer &&
+                cached.diffuseTexture === diffuseTexture &&
+                cached.diffuseSampler === diffuseSampler &&
+                cached.normalTexture === normalTexture &&
+                cached.normalSampler === normalSampler &&
+                cached.ormTexture === ormTexture &&
+                cached.ormSampler === ormSampler &&
+                cached.shadowTexture === shadowTexture &&
+                cached.irradianceTexture === irradianceTexture &&
+                cached.prefilteredTexture === prefilteredTexture
+            ) {
+                return cached.bindGroup;
+            }
+        }
+
+        const bindGroup = this.device.createBindGroup({
+            label: `fs uniforms geoset ${geosetIndex}`,
+            layout: this.fsBindGroupLayout,
+            entries: [
+                {binding: 0, resource: {buffer: uniformsBuffer}},
+                {binding: 1, resource: diffuseSampler},
+                {binding: 2, resource: diffuseTexture.createView()},
+                {binding: 3, resource: normalSampler},
+                {binding: 4, resource: normalTexture.createView()},
+                {binding: 5, resource: ormSampler},
+                {binding: 6, resource: ormTexture.createView()},
+                {binding: 7, resource: this.rendererData.gpuDepthSampler},
+                {binding: 8, resource: shadowTexture.createView()},
+                {binding: 9, resource: this.prefilterEnvSampler},
+                {binding: 10, resource: irradianceTexture.createView({dimension: 'cube'})},
+                {binding: 11, resource: this.prefilterEnvSampler},
+                {binding: 12, resource: prefilteredTexture.createView({dimension: 'cube'})},
+                {binding: 13, resource: this.gpuBrdfSampler},
+                {binding: 14, resource: this.gpuBrdfLUT.createView()}
+            ]
+        });
+        cache.push({
+            uniformsBuffer,
+            diffuseTexture,
+            diffuseSampler,
+            normalTexture,
+            normalSampler,
+            ormTexture,
+            ormSampler,
+            shadowTexture,
+            irradianceTexture,
+            prefilteredTexture,
+            bindGroup
+        });
+        return bindGroup;
+    }
+
     private renderEnvironmentGPU (pass: GPURenderPassEncoder, mvMatrix: mat4, pMatrix: mat4) {
         pass.setPipeline(this.envPiepeline);
 
-        const VSUniformsValues = new ArrayBuffer(128);
-        const VSUniformsViews = {
-            mvMatrix: new Float32Array(VSUniformsValues, 0, 16),
-            pMatrix: new Float32Array(VSUniformsValues, 64, 16)
-        };
+        const VSUniformsViews = this.envVSUniformsViews;
         VSUniformsViews.mvMatrix.set(mvMatrix);
         VSUniformsViews.pMatrix.set(pMatrix);
-        this.device.queue.writeBuffer(this.envVSUniformsBuffer, 0, VSUniformsValues);
+        this.device.queue.writeBuffer(this.envVSUniformsBuffer, 0, this.envVSUniformsValues);
 
         pass.setBindGroup(0, this.envVSBindGroup);
 
         for (const path in this.rendererData.gpuEnvTextures) {
-            const fsUniformsBindGroup = this.device.createBindGroup({
-                label: `env fs uniforms ${path}`,
-                layout: this.envFSBindGroupLayout,
-                entries: [
-                    {
-                        binding: 0,
-                        resource: this.envSampler
-                    },
-                    {
-                        binding: 1,
-                        resource: this.rendererData.gpuEnvTextures[path].createView({ dimension: 'cube' })
-                    }
-                ]
-            });
+            const texture = this.rendererData.gpuEnvTextures[path];
+            let cached = this.envFSBindGroupCache[path];
+            if (!cached || cached.texture !== texture) {
+                cached = this.envFSBindGroupCache[path] = {
+                    texture,
+                    bindGroup: this.device.createBindGroup({
+                        label: `env fs uniforms ${path}`,
+                        layout: this.envFSBindGroupLayout,
+                        entries: [
+                            {binding: 0, resource: this.envSampler},
+                            {binding: 1, resource: texture.createView({dimension: 'cube'})}
+                        ]
+                    })
+                };
+            }
 
-            pass.setBindGroup(1, fsUniformsBindGroup);
+            pass.setBindGroup(1, cached.bindGroup);
 
             pass.setPipeline(this.envPiepeline);
             pass.setVertexBuffer(0, this.cubeGPUVertexBuffer);
