@@ -6,6 +6,9 @@ This repository is the War3 Assets Manager compatibility fork of
 API compatible while maintaining renderer correctness, WebGPU fallback, and
 resource-lifecycle fixes required by the desktop catalog.
 
+Release commits include prebuilt `dist` entry points so an exact Git revision
+remains installable when dependency lifecycle scripts are disabled.
+
 ## Demo
 * [WebGL/WebGPU model previewer](https://4eb0da.ru/war3-model/dist/docs/preview/preview.html)
 * [MDL/MDX converter (also json-like structure-previewer)](https://4eb0da.ru/war3-model/dist/docs/convert/convert.html)
