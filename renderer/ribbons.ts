@@ -9,6 +9,7 @@ import {mat4, vec3} from 'gl-matrix';
 import vertexShader from './shaders/webgl/ribbon.vs.glsl?raw';
 import fragmentShader from './shaders/webgl/ribbon.fs.glsl?raw';
 import ribbonShader from './shaders/webgpu/ribbons.wgsl?raw';
+import {comparePriorityPlane, getLayerDiscardAlphaLevel} from './renderSemantics';
 
 interface RibbonEmitterWrapper {
     index: number;
@@ -106,6 +107,11 @@ export class RibbonsController {
 
                 this.emitters.push(emitter);
             }
+            this.emitters.sort((left, right) => {
+                const leftPriority = rendererData.model.Materials[left.props.MaterialID]?.PriorityPlane ?? 0;
+                const rightPriority = rendererData.model.Materials[right.props.MaterialID]?.PriorityPlane ?? 0;
+                return comparePriorityPlane(leftPriority, left.index, rightPriority, right.index);
+            });
         }
     }
 
@@ -129,8 +135,18 @@ export class RibbonsController {
             this.gpuVSUniformsBuffer = null;
         }
         for (const emitter of this.emitters) {
+            if (this.gl) {
+                if (emitter.vertexBuffer) {
+                    this.gl.deleteBuffer(emitter.vertexBuffer);
+                }
+                if (emitter.texCoordBuffer) {
+                    this.gl.deleteBuffer(emitter.texCoordBuffer);
+                }
+            }
+            emitter.vertexGPUBuffer?.destroy();
+            emitter.texCoordGPUBuffer?.destroy();
             for (const buffer of emitter.fsUnifrmsPerLayer) {
-                buffer.destroy();
+                buffer?.destroy();
             }
         }
         this.emitters = [];
@@ -289,12 +305,12 @@ export class RibbonsController {
             createPipeline('additive', {
                 color: {
                     operation: 'add',
-                    srcFactor: 'src',
+                    srcFactor: 'src-alpha',
                     dstFactor: 'one'
                 },
                 alpha: {
                     operation: 'add',
-                    srcFactor: 'src',
+                    srcFactor: 'src-alpha',
                     dstFactor: 'one'
                 }
             }, {
@@ -374,7 +390,7 @@ export class RibbonsController {
         }
     }
 
-    public render (mvMatrix: mat4, pMatrix: mat4): void {
+    public render (mvMatrix: mat4, pMatrix: mat4, emitterIndices?: readonly number[]): void {
         this.gl.useProgram(this.shaderProgram);
 
         this.gl.uniformMatrix4fv(this.shaderProgramLocations.pMatrixUniform, false, pMatrix);
@@ -384,6 +400,9 @@ export class RibbonsController {
         this.gl.enableVertexAttribArray(this.shaderProgramLocations.textureCoordAttribute);
 
         for (const emitter of this.emitters) {
+            if (emitterIndices && !emitterIndices.includes(emitter.index)) {
+                continue;
+            }
             if (emitter.creationTimes.length < 2) {
                 continue;
             }
@@ -407,7 +426,12 @@ export class RibbonsController {
         this.gl.disableVertexAttribArray(this.shaderProgramLocations.textureCoordAttribute);
     }
 
-    public renderGPU (pass: GPURenderPassEncoder, mvMatrix: mat4, pMatrix: mat4): void {
+    public renderGPU (
+        pass: GPURenderPassEncoder,
+        mvMatrix: mat4,
+        pMatrix: mat4,
+        emitterIndices?: readonly number[]
+    ): void {
         const VSUniformsValues = new ArrayBuffer(128);
         const VSUniformsViews = {
             mvMatrix: new Float32Array(VSUniformsValues, 0, 16),
@@ -418,6 +442,9 @@ export class RibbonsController {
         this.device.queue.writeBuffer(this.gpuVSUniformsBuffer, 0, VSUniformsValues);
 
         for (const emitter of this.emitters) {
+            if (emitterIndices && !emitterIndices.includes(emitter.index)) {
+                continue;
+            }
             if (emitter.creationTimes.length < 2) {
                 continue;
             }
@@ -451,7 +478,7 @@ export class RibbonsController {
 
                 fsUniformsViews.replaceableColor.set(this.rendererData.teamColor);
                 fsUniformsViews.replaceableType.set([texture.ReplaceableId || 0]);
-                fsUniformsViews.discardAlphaLevel.set([layer.FilterMode === FilterMode.Transparent ? .75 : 0]);
+                fsUniformsViews.discardAlphaLevel.set([getLayerDiscardAlphaLevel(layer.FilterMode)]);
                 fsUniformsViews.color.set([
                     emitter.props.Color[0],
                     emitter.props.Color[1],
@@ -661,11 +688,10 @@ export class RibbonsController {
             this.gl.enable(this.gl.CULL_FACE);
         }
 
-        if (layer.FilterMode === FilterMode.Transparent) {
-            this.gl.uniform1f(this.shaderProgramLocations.discardAlphaLevelUniform, 0.75);
-        } else {
-            this.gl.uniform1f(this.shaderProgramLocations.discardAlphaLevelUniform, 0.);
-        }
+        this.gl.uniform1f(
+            this.shaderProgramLocations.discardAlphaLevelUniform,
+            getLayerDiscardAlphaLevel(layer.FilterMode)
+        );
 
         if (layer.FilterMode === FilterMode.None) {
             this.gl.disable(this.gl.BLEND);
@@ -685,7 +711,7 @@ export class RibbonsController {
         } else if (layer.FilterMode === FilterMode.Additive) {
             this.gl.enable(this.gl.BLEND);
             this.gl.enable(this.gl.DEPTH_TEST);
-            this.gl.blendFunc(this.gl.SRC_COLOR, this.gl.ONE);
+            this.gl.blendFunc(this.gl.SRC_ALPHA, this.gl.ONE);
             this.gl.depthMask(false);
         } else if (layer.FilterMode === FilterMode.AddAlpha) {
             this.gl.enable(this.gl.BLEND);

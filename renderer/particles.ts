@@ -11,6 +11,7 @@ import {lerp} from './interp';
 import vertexShader from './shaders/webgl/particles.vs.glsl?raw';
 import fragmentShader from './shaders/webgl/particles.fs.glsl?raw';
 import particlesShader from './shaders/webgpu/particles.wgsl?raw';
+import {comparePriorityPlane} from './renderSemantics';
 
 const rotateCenter: vec3 = vec3.fromValues(0, 0, 0);
 const firstColor = vec4.create();
@@ -171,6 +172,12 @@ export class ParticlesController {
 
                 this.emitters.push(emitter);
             }
+            this.emitters.sort((left, right) => comparePriorityPlane(
+                left.props.PriorityPlane,
+                left.index,
+                right.props.PriorityPlane,
+                right.index
+            ));
         }
     }
 
@@ -197,6 +204,20 @@ export class ParticlesController {
         }
 
         for (const emitter of this.emitters) {
+            if (this.gl) {
+                [
+                    emitter.colorBuffer,
+                    emitter.indexBuffer,
+                    emitter.headVertexBuffer,
+                    emitter.tailVertexBuffer,
+                    emitter.headTexCoordBuffer,
+                    emitter.tailTexCoordBuffer
+                ].forEach(buffer => {
+                    if (buffer) {
+                        this.gl.deleteBuffer(buffer);
+                    }
+                });
+            }
             if (emitter.colorGPUBuffer) {
                 emitter.colorGPUBuffer.destroy();
             }
@@ -348,12 +369,12 @@ export class ParticlesController {
             createPipeline('additive', {
                 color: {
                     operation: 'add',
-                    srcFactor: 'src',
+                    srcFactor: 'src-alpha',
                     dstFactor: 'one'
                 },
                 alpha: {
                     operation: 'add',
-                    srcFactor: 'src',
+                    srcFactor: 'src-alpha',
                     dstFactor: 'one'
                 }
             }, {
@@ -587,7 +608,7 @@ export class ParticlesController {
         }
     }
 
-    public render (mvMatrix: mat4, pMatrix: mat4): void {
+    public render (mvMatrix: mat4, pMatrix: mat4, emitterIndices?: readonly number[]): void {
         this.gl.enable(this.gl.CULL_FACE);
         this.gl.useProgram(this.shaderProgram);
 
@@ -599,6 +620,9 @@ export class ParticlesController {
         this.gl.enableVertexAttribArray(this.shaderProgramLocations.colorAttribute);
 
         for (const emitter of this.emitters) {
+            if (emitterIndices && !emitterIndices.includes(emitter.index)) {
+                continue;
+            }
             if (!emitter.particles.length) {
                 continue;
             }
@@ -639,7 +663,12 @@ export class ParticlesController {
         pass.drawIndexed(emitter.particles.length * 6);
     }
 
-    public renderGPU (pass: GPURenderPassEncoder, mvMatrix: mat4, pMatrix: mat4): void {
+    public renderGPU (
+        pass: GPURenderPassEncoder,
+        mvMatrix: mat4,
+        pMatrix: mat4,
+        emitterIndices?: readonly number[]
+    ): void {
         const VSUniformsValues = new ArrayBuffer(128);
         const VSUniformsViews = {
             mvMatrix: new Float32Array(VSUniformsValues, 0, 16),
@@ -652,6 +681,9 @@ export class ParticlesController {
         pass.setBindGroup(0, this.gpuVSUniformsBindGroup);
 
         for (const emitter of this.emitters) {
+            if (emitterIndices && !emitterIndices.includes(emitter.index)) {
+                continue;
+            }
             if (!emitter.particles.length) {
                 continue;
             }

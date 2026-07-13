@@ -7,6 +7,7 @@ uniform sampler2D uSampler;
 uniform vec3 uReplaceableColor;
 uniform float uReplaceableType;
 uniform float uDiscardAlphaLevel;
+uniform float uAlpha;
 uniform mat3 uTVertexAnim;
 uniform float uWireframe;
 
@@ -38,6 +39,8 @@ void main(void) {
         float alpha = sin(truncateDist);
         gl_FragColor = vec4(uReplaceableColor * alpha, 1.0);
     }
+
+    gl_FragColor.a *= uAlpha;
 
     // hand-made alpha-test
     if (gl_FragColor[3] < uDiscardAlphaLevel) {

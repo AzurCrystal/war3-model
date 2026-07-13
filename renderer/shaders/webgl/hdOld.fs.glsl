@@ -162,7 +162,7 @@ void main(void) {
     color = color / (vec3(1.) + color);
     color = pow(color, vec3(1. / gamma));
 
-    gl_FragColor = vec4(color, 1.);
+    gl_FragColor = vec4(color, baseColor.a);
 
     // hand-made alpha-test
     if (gl_FragColor[3] < uDiscardAlphaLevel) {

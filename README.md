@@ -1,6 +1,11 @@
 # war3-model
 TypeScript-based mdl/mdx (Warcraft 3 model formats) converter/renderer
 
+This repository is the War3 Assets Manager compatibility fork of
+[4eb0da/war3-model](https://github.com/4eb0da/war3-model). It keeps the public
+API compatible while maintaining renderer correctness, WebGPU fallback, and
+resource-lifecycle fixes required by the desktop catalog.
+
 ## Demo
 * [WebGL/WebGPU model previewer](https://4eb0da.ru/war3-model/dist/docs/preview/preview.html)
 * [MDL/MDX converter (also json-like structure-previewer)](https://4eb0da.ru/war3-model/dist/docs/convert/convert.html)
@@ -16,7 +21,7 @@ TypeScript-based mdl/mdx (Warcraft 3 model formats) converter/renderer
 * [How to render model in browser](docs/how-to-render.md)
 
 ```bash
-npm i war3-model --save
+npm i github:AzurCrystal/war3-model#v4.0.1-wam.1 --save
 ```
 
 MDL parsing/generation
@@ -73,8 +78,8 @@ New versions 900 (not sure), 1000 and 1100 are supported in parsers, generators 
 * RibbonEmitter (w/o Gravity and TextureSlot/Color animation)
 * ParticleEmitter2 (with Tail/Head/Both/Squirt(?))
 * Reforged PBR lightning (orm textures, specular, normal mapping, env textures, etc)
+* Material, ParticleEmitter2, and RibbonEmitter render priority planes
 * No Light nodes support (Light, Unshaded, etc)
-* No render priority support (PriorityPlane and others)
 * BLP / DDS are supported
 
 ## BLP support

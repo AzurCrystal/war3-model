@@ -7,7 +7,8 @@ const isSamples = Boolean(process.env.SAMPLES);
 
 const banner = `/*!
     war3-model v${pkg.version}
-	https://github.com/4eb0da/war3-model
+	https://github.com/AzurCrystal/war3-model
+	Based on https://github.com/4eb0da/war3-model
 	Released under the MIT License.
 */`;
 

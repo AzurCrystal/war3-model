@@ -1,6 +1,6 @@
 {
   "name": "war3-model",
-  "version": "4.0.1",
+  "version": "4.0.1-wam.1",
   "description": "Warcraft 3 model parser, generator, convertor and previewer",
   "keywords": [
     "warcraft3",
@@ -14,23 +14,25 @@
     "front-end",
     "backend"
   ],
-  "homepage": "https://github.com/4eb0da/war3-model",
+  "homepage": "https://github.com/AzurCrystal/war3-model",
   "bugs": {
-    "url": "https://github.com/4eb0da/war3-model/issues"
+    "url": "https://github.com/AzurCrystal/war3-model/issues"
   },
-  "repository": "github:4eb0da/war3-model",
+  "repository": "github:AzurCrystal/war3-model",
   "author": "4eb0da",
   "license": "MIT",
   "engines": {
-    "node": ">=4.0.0"
+    "node": ">=20.19.0"
   },
   "scripts": {
-    "prepublishOnly": "npm run build-lib",
-    "prepare": "husky install",
+    "prepublishOnly": "npm run check",
+    "prepare": "npm run build-lib",
     "dev": "vite",
     "build-lib": "vite build",
     "build-samples": "SAMPLES=1 vite build",
     "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "check": "npm run typecheck && npm run test && npm run build-lib",
     "lint": "eslint --ext .ts ."
   },
   "dependencies": {
@@ -46,10 +48,11 @@
     "eslint": "10.0.3",
     "husky": "7.0.4",
     "monaco-editor": "0.55.1",
-    "typescript": "6.0.2",
+    "typescript": "5.9.3",
     "typescript-eslint": "8.57.0",
     "vite": "8.0.0",
-    "vite-plugin-dts": "4.5.4"
+    "vite-plugin-dts": "4.5.4",
+    "vitest": "4.1.10"
   },
   "files": [
     "dist/*"

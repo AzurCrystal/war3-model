@@ -9,6 +9,7 @@ struct FSUniforms {
     replaceableType: u32,
     discardAlphaLevel: f32,
     wireframe: u32,
+    alpha: f32,
     tVertexAnim: mat3x3f,
 }
 
@@ -93,6 +94,8 @@ fn hypot(z: vec2f) -> f32 {
         let alpha: f32 = sin(truncateDist);
         color = vec4f(fsUniforms.replaceableColor * alpha, 1.0);
     }
+
+    color.a *= fsUniforms.alpha;
 
     // hand-made alpha-test
     if (color.a < fsUniforms.discardAlphaLevel) {
