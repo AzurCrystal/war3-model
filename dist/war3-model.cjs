@@ -1237,6 +1237,7 @@ function parse(str) {
 //#region mdx/parse.ts
 var BIG_ENDIAN$1 = true;
 var NONE$1 = -1;
+var NATIVE_LITTLE_ENDIAN = new Uint8Array(new Uint16Array([1]).buffer)[0] === 1;
 var AnimVectorType$1 = /* @__PURE__ */ function(AnimVectorType) {
 	AnimVectorType[AnimVectorType["INT1"] = 0] = "INT1";
 	AnimVectorType[AnimVectorType["FLOAT1"] = 1] = "FLOAT1";
@@ -1285,14 +1286,22 @@ var State = class {
 		return res;
 	}
 	float32Array(len) {
+		const [start, end] = this.readArrayRange(len, Float32Array.BYTES_PER_ELEMENT);
+		if (NATIVE_LITTLE_ENDIAN) return new Float32Array(this.ab.slice(start, end));
 		const res = new Float32Array(len);
-		for (let i = 0; i < len; ++i) res[i] = this.float32();
+		for (let i = 0; i < len; ++i) res[i] = this.view.getFloat32(start + i * Float32Array.BYTES_PER_ELEMENT, BIG_ENDIAN$1);
+		return res;
+	}
+	uint16Array(len) {
+		const [start, end] = this.readArrayRange(len, Uint16Array.BYTES_PER_ELEMENT);
+		if (NATIVE_LITTLE_ENDIAN) return new Uint16Array(this.ab.slice(start, end));
+		const res = new Uint16Array(len);
+		for (let i = 0; i < len; ++i) res[i] = this.view.getUint16(start + i * Uint16Array.BYTES_PER_ELEMENT, BIG_ENDIAN$1);
 		return res;
 	}
 	uint8Array(len) {
-		const res = new Uint8Array(len);
-		for (let i = 0; i < len; ++i) res[i] = this.uint8();
-		return res;
+		const [start, end] = this.readArrayRange(len, Uint8Array.BYTES_PER_ELEMENT);
+		return this.uint.slice(start, end);
 	}
 	str(length) {
 		let stringLength = length;
@@ -1308,22 +1317,34 @@ var State = class {
 		const keysCount = this.int32();
 		res.LineType = this.int32();
 		res.GlobalSeqId = this.int32();
+		const vectorStorage = isInt ? new Int32Array(keysCount * vectorSize) : new Float32Array(keysCount * vectorSize);
+		const tangentStorage = res.LineType === LineType.Hermite || res.LineType === LineType.Bezier ? new Float32Array(keysCount * vectorSize * 2) : null;
 		if (res.GlobalSeqId === NONE$1) res.GlobalSeqId = null;
 		for (let i = 0; i < keysCount; ++i) {
 			const animKeyFrame = {};
 			animKeyFrame.Frame = this.int32();
-			if (isInt) animKeyFrame.Vector = new Int32Array(vectorSize);
-			else animKeyFrame.Vector = new Float32Array(vectorSize);
+			const vectorOffset = i * vectorSize;
+			animKeyFrame.Vector = vectorStorage.subarray(vectorOffset, vectorOffset + vectorSize);
 			for (let j = 0; j < vectorSize; ++j) if (isInt) animKeyFrame.Vector[j] = this.int32();
 			else animKeyFrame.Vector[j] = this.float32();
-			if (res.LineType === LineType.Hermite || res.LineType === LineType.Bezier) for (const part of ["InTan", "OutTan"]) {
-				animKeyFrame[part] = new Float32Array(vectorSize);
-				for (let j = 0; j < vectorSize; ++j) if (isInt) animKeyFrame[part][j] = this.int32();
-				else animKeyFrame[part][j] = this.float32();
+			if (tangentStorage) {
+				const tangentOffset = i * vectorSize * 2;
+				animKeyFrame.InTan = tangentStorage.subarray(tangentOffset, tangentOffset + vectorSize);
+				animKeyFrame.OutTan = tangentStorage.subarray(tangentOffset + vectorSize, tangentOffset + vectorSize * 2);
+				for (const tangent of [animKeyFrame.InTan, animKeyFrame.OutTan]) for (let j = 0; j < vectorSize; ++j) tangent[j] = isInt ? this.int32() : this.float32();
 			}
 			res.Keys.push(animKeyFrame);
 		}
 		return res;
+	}
+	readArrayRange(len, bytesPerElement) {
+		if (!Number.isSafeInteger(len) || len < 0) throw new RangeError("Invalid typed array length");
+		const byteLength = len * bytesPerElement;
+		const start = this.pos;
+		const end = start + byteLength;
+		if (!Number.isSafeInteger(end) || end > this.length) throw new RangeError("Unexpected end of MDX array data");
+		this.pos = end;
+		return [start, end];
 	}
 };
 function parseExtent(obj, state) {
@@ -1439,12 +1460,10 @@ function parseGeosets(model, state, size) {
 		state.int32();
 		state.expectKeyword("VRTX", "Incorrect geosets format");
 		const verticesCount = state.int32();
-		geoset.Vertices = new Float32Array(verticesCount * 3);
-		for (let i = 0; i < verticesCount * 3; ++i) geoset.Vertices[i] = state.float32();
+		geoset.Vertices = state.float32Array(verticesCount * 3);
 		state.expectKeyword("NRMS", "Incorrect geosets format");
 		const normalsCount = state.int32();
-		geoset.Normals = new Float32Array(normalsCount * 3);
-		for (let i = 0; i < normalsCount * 3; ++i) geoset.Normals[i] = state.float32();
+		geoset.Normals = state.float32Array(normalsCount * 3);
 		state.expectKeyword("PTYP", "Incorrect geosets format");
 		const primitiveCount = state.int32();
 		for (let i = 0; i < primitiveCount; ++i) if (state.int32() !== 4) throw new Error("Incorrect geosets format");
@@ -1453,12 +1472,10 @@ function parseGeosets(model, state, size) {
 		for (let i = 0; i < faceGroupCount; ++i) state.int32();
 		state.expectKeyword("PVTX", "Incorrect geosets format");
 		const indicesCount = state.int32();
-		geoset.Faces = new Uint16Array(indicesCount);
-		for (let i = 0; i < indicesCount; ++i) geoset.Faces[i] = state.uint16();
+		geoset.Faces = state.uint16Array(indicesCount);
 		state.expectKeyword("GNDX", "Incorrect geosets format");
 		const verticesGroupCount = state.int32();
-		geoset.VertexGroup = new Uint8Array(verticesGroupCount);
-		for (let i = 0; i < verticesGroupCount; ++i) geoset.VertexGroup[i] = state.uint8();
+		geoset.VertexGroup = state.uint8Array(verticesGroupCount);
 		state.expectKeyword("MTGC", "Incorrect geosets format");
 		const groupsCount = state.int32();
 		geoset.Groups = [];
@@ -1509,9 +1526,7 @@ function parseGeosets(model, state, size) {
 		for (let i = 0; i < textureChunkCount; ++i) {
 			state.expectKeyword("UVBS", "Incorrect geosets format");
 			const textureCoordsCount = state.int32();
-			const tvertices = new Float32Array(textureCoordsCount * 2);
-			for (let j = 0; j < textureCoordsCount * 2; ++j) tvertices[j] = state.float32();
-			geoset.TVertices.push(tvertices);
+			geoset.TVertices.push(state.float32Array(textureCoordsCount * 2));
 		}
 		model.Geosets.push(geoset);
 	}
