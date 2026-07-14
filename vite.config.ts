@@ -26,6 +26,7 @@ function emitBrowserDts(): Plugin {
     blp,
     decodeBLP,
     getBLPImageData,
+    createBLPImageDecoder,
     ModelRenderer
 } from './war3-model.d.ts';
 
@@ -40,6 +41,7 @@ declare global {
             blp: typeof blp;
             decodeBLP: typeof decodeBLP;
             getBLPImageData: typeof getBLPImageData;
+            createBLPImageDecoder: typeof createBLPImageDecoder;
             ModelRenderer: typeof ModelRenderer;
         };
     }

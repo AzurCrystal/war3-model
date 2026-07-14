@@ -1,6 +1,7 @@
 node_modules
 /dist
 /docs/dist
+/wasm/blp-jpeg-decoder/target
 *.js
 *.js.map
 *.d.ts

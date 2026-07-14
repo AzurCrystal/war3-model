@@ -5,6 +5,7 @@ import {generate as generateMDL} from './mdl/generate';
 import {generate as generateMDX} from './mdx/generate';
 import * as blp from './blp/blpimage';
 import {decode as decodeBLP, getImageData as getBLPImageData} from './blp/decode';
+import {createBLPImageDecoder} from './blp/imageDecoder';
 import {ModelRenderer} from './renderer/modelRenderer';
 
 const war3model = {
@@ -16,6 +17,7 @@ const war3model = {
     blp,
     decodeBLP,
     getBLPImageData,
+    createBLPImageDecoder,
     ModelRenderer
 };
 

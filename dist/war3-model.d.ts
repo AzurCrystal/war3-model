@@ -40,6 +40,10 @@ declare enum BLPContent {
     Direct = 1
 }
 
+export declare type BLPDecoderBackend = 'wasm-simd' | 'javascript';
+
+export declare type BLPDecoderBackendPreference = 'auto' | BLPDecoderBackend;
+
 declare interface BLPImage {
     type: BLPType;
     width: number;
@@ -48,6 +52,12 @@ declare interface BLPImage {
     alphaBits: number;
     mipmaps: BLPMipMap[];
     data: ArrayBuffer;
+}
+
+export declare interface BLPImageDecoder {
+    readonly backend: BLPDecoderBackend;
+    getImageData(blp: BLPImage, mipmapLevel: number): ImageDataLike;
+    dispose(): void;
 }
 
 declare interface BLPMipMap {
@@ -87,6 +97,13 @@ declare interface CollisionShape extends Node_2 {
 declare enum CollisionShapeType {
     Box = 0,
     Sphere = 2
+}
+
+export declare function createBLPImageDecoder(options?: CreateBLPImageDecoderOptions): Promise<BLPImageDecoder>;
+
+export declare interface CreateBLPImageDecoderOptions {
+    backend?: BLPDecoderBackendPreference;
+    wasmModule?: WebAssembly.Module | ArrayBuffer;
 }
 
 declare type DDS_FORMAT = WEBGL_compressed_texture_s3tc['COMPRESSED_RGBA_S3TC_DXT1_EXT'] | WEBGL_compressed_texture_s3tc['COMPRESSED_RGBA_S3TC_DXT3_EXT'] | WEBGL_compressed_texture_s3tc['COMPRESSED_RGBA_S3TC_DXT5_EXT'] | WEBGL_compressed_texture_s3tc['COMPRESSED_RGB_S3TC_DXT1_EXT'];
@@ -162,7 +179,7 @@ declare type Helper = Node_2;
 declare interface ImageDataLike {
     width: number;
     height: number;
-    data: ImageDataArray;
+    data: Uint8ClampedArray<ArrayBuffer>;
     colorSpace: 'srgb' | 'display-p3' | undefined;
 }
 

@@ -1,6 +1,6 @@
 {
   "name": "war3-model",
-  "version": "4.0.1-wam.2",
+  "version": "4.0.1-wam.3",
   "description": "Warcraft 3 model parser, generator, convertor and previewer",
   "keywords": [
     "warcraft3",
@@ -25,6 +25,9 @@
     "node": ">=20.19.0"
   },
   "scripts": {
+    "benchmark-blp": "node scripts/benchmark-blp-wasm.mjs",
+    "build-blp-wasm": "node scripts/build-blp-wasm.mjs",
+    "check-blp-wasm": "node scripts/build-blp-wasm.mjs --check",
     "prepublishOnly": "npm run check",
     "prepare": "npm run build-lib",
     "dev": "vite",
@@ -32,7 +35,7 @@
     "build-samples": "SAMPLES=1 vite build",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "check": "npm run typecheck && npm run test && npm run build-lib",
+    "check": "npm run check-blp-wasm && npm run typecheck && npm run test && npm run build-lib",
     "lint": "eslint --ext .ts ."
   },
   "dependencies": {
@@ -55,7 +58,9 @@
     "vitest": "4.1.10"
   },
   "files": [
-    "dist/*"
+    "dist/*",
+    "licenses/*",
+    "THIRD_PARTY_NOTICES.md"
   ],
   "main": "dist/war3-model.cjs",
   "module": "dist/es/war3-model.mjs",
